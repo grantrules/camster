@@ -1,0 +1,18 @@
+services:
+  camster-build:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+    tty: true
+
+  camster-build-windows:
+    build:
+      context: .
+      dockerfile: Dockerfile.windows
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+    tty: true

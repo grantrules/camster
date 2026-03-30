@@ -1,0 +1,151 @@
+cmake_minimum_required(VERSION 3.22)
+project(camster LANGUAGES C CXX)
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+if(MSVC)
+  add_compile_options(/W4 /permissive-)
+else()
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+
+find_package(Vulkan REQUIRED)
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
+include(FetchContent)
+
+if(UNIX AND NOT APPLE AND NOT WIN32)
+  set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "Disable Wayland backend" FORCE)
+  set(GLFW_BUILD_X11 ON CACHE BOOL "Enable X11 backend" FORCE)
+endif()
+
+FetchContent_Declare(
+  glfw
+  GIT_REPOSITORY https://github.com/glfw/glfw.git
+  GIT_TAG 3.4
+)
+FetchContent_MakeAvailable(glfw)
+
+FetchContent_Declare(
+  glm
+  GIT_REPOSITORY https://github.com/g-truc/glm.git
+  GIT_TAG 1.0.1
+)
+FetchContent_MakeAvailable(glm)
+
+FetchContent_Declare(
+  nlohmann_json
+  GIT_REPOSITORY https://github.com/nlohmann/json.git
+  GIT_TAG v3.11.3
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
+FetchContent_Declare(
+  imgui
+  GIT_REPOSITORY https://github.com/ocornut/imgui.git
+  GIT_TAG v1.91.9b
+)
+FetchContent_MakeAvailable(imgui)
+
+FetchContent_Declare(
+  tinyfiledialogs
+  GIT_REPOSITORY https://github.com/native-toolkit/libtinyfiledialogs.git
+  GIT_TAG master
+)
+FetchContent_MakeAvailable(tinyfiledialogs)
+
+add_library(imgui STATIC
+  ${imgui_SOURCE_DIR}/imgui.cpp
+  ${imgui_SOURCE_DIR}/imgui_draw.cpp
+  ${imgui_SOURCE_DIR}/imgui_tables.cpp
+  ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+  ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
+  ${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp
+)
+target_include_directories(imgui PUBLIC
+  ${imgui_SOURCE_DIR}
+  ${imgui_SOURCE_DIR}/backends
+)
+target_link_libraries(imgui PUBLIC glfw Vulkan::Vulkan)
+
+set(CAMSTER_SOURCES
+  src/main.cpp
+  src/CameraController.cpp
+  src/StlMesh.cpp
+  src/PanelConfig.cpp
+  src/VulkanRenderer.cpp
+  ${tinyfiledialogs_SOURCE_DIR}/tinyfiledialogs.c
+)
+
+add_executable(camster ${CAMSTER_SOURCES})
+
+target_include_directories(camster PRIVATE
+  src
+  ${tinyfiledialogs_SOURCE_DIR}
+)
+
+target_link_libraries(camster PRIVATE
+  glfw
+  glm
+  nlohmann_json::nlohmann_json
+  imgui
+  Vulkan::Vulkan
+)
+
+target_compile_definitions(camster PRIVATE
+  CAMSTER_PYTHON_EXECUTABLE="${Python3_EXECUTABLE}"
+  CAMSTER_ENABLE_VALIDATION=$<CONFIG:Debug>
+)
+
+find_program(GLSLC glslc HINTS ENV VULKAN_SDK PATH_SUFFIXES Bin bin)
+find_program(GLSLANG_VALIDATOR glslangValidator HINTS ENV VULKAN_SDK PATH_SUFFIXES Bin bin)
+
+if(GLSLC)
+  set(SHADER_COMPILER ${GLSLC})
+  set(SHADER_COMPILE_ARGS)
+elseif(GLSLANG_VALIDATOR)
+  set(SHADER_COMPILER ${GLSLANG_VALIDATOR})
+  set(SHADER_COMPILE_ARGS -V)
+else()
+  message(FATAL_ERROR "Neither glslc nor glslangValidator was found. Install Vulkan SDK tools.")
+endif()
+
+set(SHADER_OUTPUT_DIR ${CMAKE_CURRENT_BINARY_DIR}/shaders)
+file(MAKE_DIRECTORY ${SHADER_OUTPUT_DIR})
+
+set(SHADER_SOURCES
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/mesh.vert
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/mesh.frag
+)
+
+set(COMPILED_SHADERS)
+foreach(SHADER_FILE IN LISTS SHADER_SOURCES)
+  get_filename_component(SHADER_NAME ${SHADER_FILE} NAME)
+  set(SPIRV_FILE ${SHADER_OUTPUT_DIR}/${SHADER_NAME}.spv)
+  add_custom_command(
+    OUTPUT ${SPIRV_FILE}
+    COMMAND ${SHADER_COMPILER} ${SHADER_COMPILE_ARGS} ${SHADER_FILE} -o ${SPIRV_FILE}
+    DEPENDS ${SHADER_FILE}
+    COMMENT "Compiling ${SHADER_NAME}"
+    VERBATIM
+  )
+  list(APPEND COMPILED_SHADERS ${SPIRV_FILE})
+endforeach()
+
+add_custom_target(shaders ALL DEPENDS ${COMPILED_SHADERS})
+add_dependencies(camster shaders)
+
+install(TARGETS camster RUNTIME DESTINATION bin COMPONENT Runtime)
+install(FILES ${COMPILED_SHADERS} DESTINATION bin/shaders COMPONENT Runtime)
+install(FILES
+  assets/panel_config.py
+  assets/sample_cube.stl
+  DESTINATION bin/assets
+  COMPONENT Runtime
+)
+
+target_compile_definitions(camster PRIVATE
+  CAMSTER_SHADER_DIR="${SHADER_OUTPUT_DIR}"
+)

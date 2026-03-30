@@ -1,0 +1,11 @@
+build/
+build-debug/
+build-debug-docker/
+build-release-docker/
+build-windows-docker/
+dist-debug-docker/
+dist-release-docker/
+dist-windows-docker/
+.vscode/
+imgui.ini
+*.log

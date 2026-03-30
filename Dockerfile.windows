@@ -1,0 +1,34 @@
+FROM debian:bookworm-slim
+
+ARG DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bash \
+    binutils-mingw-w64-x86-64 \
+    ca-certificates \
+    cmake \
+    curl \
+    g++-mingw-w64-x86-64-posix \
+    gcc-mingw-w64-x86-64-posix \
+    git \
+    glslang-tools \
+    libvulkan-dev \
+    make \
+    mingw-w64-tools \
+    ninja-build \
+    pkg-config \
+    python3 \
+    zip \
+    && rm -rf /var/lib/apt/lists/*
+
+# Provide Vulkan headers and import library in MinGW sysroot.
+RUN mkdir -p /usr/x86_64-w64-mingw32/include \
+    && cp -r /usr/include/vulkan /usr/x86_64-w64-mingw32/include/ \
+    && cp -r /usr/include/vk_video /usr/x86_64-w64-mingw32/include/ \
+    && curl -fsSL https://raw.githubusercontent.com/KhronosGroup/Vulkan-Loader/v1.3.296/loader/vulkan-1.def -o /tmp/vulkan-1.def \
+    && x86_64-w64-mingw32-dlltool -d /tmp/vulkan-1.def -D vulkan-1.dll -l /usr/x86_64-w64-mingw32/lib/libvulkan-1.a \
+    && rm -f /tmp/vulkan-1.def
+
+WORKDIR /workspace
+
+CMD ["bash"]
