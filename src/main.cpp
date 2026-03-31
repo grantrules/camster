@@ -1,5 +1,7 @@
 #include <array>
+#include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
 #include <future>
@@ -39,6 +41,47 @@
 #include "ui/PrintWindow.hpp"
 
 namespace {
+enum class BooleanOp { Add, Subtract };
+
+enum class ObjectPickMode {
+  None,
+  ExtrudeTargets,
+  CombineTargets,
+  CombineTools,
+};
+
+struct ExtrudeOptionsState {
+  bool visible = false;
+  bool applyRequested = false;
+  BooleanOp operation = BooleanOp::Add;
+  std::vector<int> targets;
+  char depthBuffer[64] = {};
+};
+
+struct CombineOptionsState {
+  bool visible = false;
+  BooleanOp operation = BooleanOp::Add;
+  bool keepTools = false;
+  std::vector<int> targets;
+  std::vector<int> tools;
+};
+
+void addUniqueIndex(std::vector<int>& list, int idx) {
+  if (idx < 0) return;
+  if (std::find(list.begin(), list.end(), idx) == list.end()) {
+    list.push_back(idx);
+  }
+}
+
+void sanitizeObjectIndices(std::vector<int>& list, int objectCount) {
+  list.erase(std::remove_if(list.begin(), list.end(), [objectCount](int idx) {
+               return idx < 0 || idx >= objectCount;
+             }),
+             list.end());
+  std::sort(list.begin(), list.end());
+  list.erase(std::unique(list.begin(), list.end()), list.end());
+}
+
 struct AppState {
   // 3D Print
   PrintSettings printSettings;
@@ -54,6 +97,9 @@ struct AppState {
   // Individual mesh objects for selection / export.
   std::vector<StlMesh> sceneObjects;
   int selectedObject = -1;  // index into sceneObjects, -1 = none
+  ObjectPickMode objectPickMode = ObjectPickMode::None;
+  ExtrudeOptionsState extrudeOptions;
+  CombineOptionsState combineOptions;
 
   // Scene / sketch state.
   SceneMode sceneMode = SceneMode::View3D;
@@ -123,6 +169,98 @@ void rebuildCombinedMesh(AppState* app) {
     app->mesh.append(obj);
   }
   app->renderer.setMesh(app->mesh);
+}
+
+bool applyAddExtrude(AppState* app, const StlMesh& extruded,
+                     const std::vector<int>& targetsRaw) {
+  if (extruded.empty()) return false;
+
+  std::vector<int> targets = targetsRaw;
+  sanitizeObjectIndices(targets, static_cast<int>(app->sceneObjects.size()));
+
+  if (targets.empty()) {
+    app->sceneObjects.push_back(extruded);
+    app->selectedObject = static_cast<int>(app->sceneObjects.size()) - 1;
+    rebuildCombinedMesh(app);
+    return true;
+  }
+
+  StlMesh merged;
+  for (int idx : targets) {
+    merged.append(app->sceneObjects[idx]);
+  }
+  merged.append(extruded);
+
+  std::vector<bool> remove(app->sceneObjects.size(), false);
+  for (int idx : targets) remove[idx] = true;
+
+  std::vector<StlMesh> next;
+  next.reserve(app->sceneObjects.size() + 1);
+  for (int i = 0; i < static_cast<int>(app->sceneObjects.size()); ++i) {
+    if (!remove[i]) next.push_back(std::move(app->sceneObjects[i]));
+  }
+  next.push_back(std::move(merged));
+
+  app->sceneObjects = std::move(next);
+  app->selectedObject = static_cast<int>(app->sceneObjects.size()) - 1;
+  rebuildCombinedMesh(app);
+  return true;
+}
+
+bool applyAddCombine(AppState* app, const std::vector<int>& targetsRaw,
+                     const std::vector<int>& toolsRaw, bool keepTools) {
+  std::vector<int> targets = targetsRaw;
+  std::vector<int> tools = toolsRaw;
+  sanitizeObjectIndices(targets, static_cast<int>(app->sceneObjects.size()));
+  sanitizeObjectIndices(tools, static_cast<int>(app->sceneObjects.size()));
+  if (targets.empty() || tools.empty()) return false;
+
+  StlMesh merged;
+  for (int idx : targets) merged.append(app->sceneObjects[idx]);
+  for (int idx : tools) merged.append(app->sceneObjects[idx]);
+
+  std::vector<bool> remove(app->sceneObjects.size(), false);
+  for (int idx : targets) remove[idx] = true;
+  if (!keepTools) {
+    for (int idx : tools) remove[idx] = true;
+  }
+
+  std::vector<StlMesh> next;
+  next.reserve(app->sceneObjects.size() + 1);
+  for (int i = 0; i < static_cast<int>(app->sceneObjects.size()); ++i) {
+    if (!remove[i]) next.push_back(std::move(app->sceneObjects[i]));
+  }
+  next.push_back(std::move(merged));
+
+  app->sceneObjects = std::move(next);
+  app->selectedObject = static_cast<int>(app->sceneObjects.size()) - 1;
+  rebuildCombinedMesh(app);
+  return true;
+}
+
+void drawObjectSelectionList(const char* title, std::vector<int>& indices,
+                             ObjectPickMode modeForSelect, AppState* app) {
+  sanitizeObjectIndices(indices, static_cast<int>(app->sceneObjects.size()));
+
+  ImGui::TextUnformatted(title);
+  int eraseAt = -1;
+  for (int i = 0; i < static_cast<int>(indices.size()); ++i) {
+    ImGui::PushID((std::string(title) + std::to_string(i)).c_str());
+    if (ImGui::SmallButton("x")) eraseAt = i;
+    ImGui::SameLine();
+    ImGui::Text("Object %d", indices[i] + 1);
+    ImGui::PopID();
+  }
+  if (eraseAt >= 0) indices.erase(indices.begin() + eraseAt);
+
+  const bool selecting = app->objectPickMode == modeForSelect;
+  if (ImGui::Button(selecting ? "Stop" : "Select")) {
+    app->objectPickMode = selecting ? ObjectPickMode::None : modeForSelect;
+  }
+  if (selecting) {
+    ImGui::SameLine();
+    ImGui::TextDisabled("Click an object in 3D view to add");
+  }
 }
 
 std::optional<ImVec2> projectToScreen(glm::vec3 world, const glm::mat4& view,
@@ -268,6 +406,24 @@ void drawMenuBar(AppState* app) {
     ImGui::EndMenu();
   }
 
+  if (ImGui::BeginMenu("Tools")) {
+    const bool canCombine = app->sceneMode == SceneMode::View3D &&
+                            app->sceneObjects.size() >= 2;
+    if (ImGui::MenuItem("Combine...", nullptr, false, canCombine)) {
+      app->combineOptions.visible = true;
+      app->combineOptions.operation = BooleanOp::Add;
+      app->combineOptions.keepTools = false;
+      app->combineOptions.targets.clear();
+      app->combineOptions.tools.clear();
+      if (app->selectedObject >= 0) {
+        addUniqueIndex(app->combineOptions.targets, app->selectedObject);
+      }
+      app->objectPickMode = ObjectPickMode::None;
+      app->status = "Combine tool opened";
+    }
+    ImGui::EndMenu();
+  }
+
   ImGui::EndMainMenuBar();
 }
 
@@ -398,6 +554,125 @@ void drawProjectSettingsWindow(AppState* app) {
   ImGui::End();
 }
 
+void drawExtrudeOptionsWindow(AppState* app) {
+  if (!app->extrudeOptions.visible) return;
+  if (!app->extrudeTool.active()) {
+    app->extrudeOptions.visible = false;
+    app->objectPickMode = ObjectPickMode::None;
+    return;
+  }
+
+  ImGui::SetNextWindowSize(ImVec2(460.0f, 0.0f), ImGuiCond_FirstUseEver);
+  bool open = app->extrudeOptions.visible;
+  if (ImGui::Begin("Extrude Options", &open)) {
+    int op = static_cast<int>(app->extrudeOptions.operation);
+    if (ImGui::Combo("Operation", &op, "Add\0Subtract\0")) {
+      app->extrudeOptions.operation = static_cast<BooleanOp>(op);
+    }
+
+    ImGui::Text("Depth:");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(140.0f);
+    ImGui::InputText("##extrudeDepth", app->extrudeOptions.depthBuffer,
+                     sizeof(app->extrudeOptions.depthBuffer));
+    ImGui::SameLine();
+    ImGui::TextDisabled("(%s)", unitSuffix(app->project.defaultUnit));
+
+    ImGui::Separator();
+    drawObjectSelectionList("Target Objects", app->extrudeOptions.targets,
+                            ObjectPickMode::ExtrudeTargets, app);
+
+    ImGui::Separator();
+    bool applyNow = app->extrudeOptions.applyRequested;
+    app->extrudeOptions.applyRequested = false;
+    if (ImGui::Button("Apply")) applyNow = true;
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel")) {
+      app->extrudeTool.cancel();
+      app->extrudeOptions.visible = false;
+      app->objectPickMode = ObjectPickMode::None;
+    }
+
+    if (applyNow) {
+      auto parsed = parseDimension(std::string(app->extrudeOptions.depthBuffer),
+                                   app->project.defaultUnit);
+      if (!parsed) {
+        app->status = "Extrude: enter a valid depth";
+      } else {
+        app->extrudeTool.setDistance(parsed->valueMm);
+        if (app->extrudeOptions.operation == BooleanOp::Subtract) {
+          app->status = "Extrude subtract requires mesh-boolean backend (not implemented yet)";
+        } else {
+          StlMesh extruded = app->extrudeTool.confirm();
+          if (!applyAddExtrude(app, extruded, app->extrudeOptions.targets)) {
+            app->status = "Extrude failed";
+          } else {
+            app->status = "Extrude add complete";
+            app->extrudeOptions.visible = false;
+            app->objectPickMode = ObjectPickMode::None;
+          }
+        }
+      }
+    }
+  }
+  ImGui::End();
+
+  app->extrudeOptions.visible = open;
+  if (!app->extrudeOptions.visible && app->objectPickMode == ObjectPickMode::ExtrudeTargets) {
+    app->objectPickMode = ObjectPickMode::None;
+  }
+}
+
+void drawCombineWindow(AppState* app) {
+  if (!app->combineOptions.visible) return;
+
+  ImGui::SetNextWindowSize(ImVec2(520.0f, 0.0f), ImGuiCond_FirstUseEver);
+  bool open = app->combineOptions.visible;
+  if (ImGui::Begin("Combine Tool", &open)) {
+    int op = static_cast<int>(app->combineOptions.operation);
+    if (ImGui::Combo("Operation", &op, "Add\0Subtract\0")) {
+      app->combineOptions.operation = static_cast<BooleanOp>(op);
+    }
+    ImGui::Checkbox("Keep Tools", &app->combineOptions.keepTools);
+
+    ImGui::Separator();
+    drawObjectSelectionList("Target Objects", app->combineOptions.targets,
+                            ObjectPickMode::CombineTargets, app);
+    ImGui::Separator();
+    drawObjectSelectionList("Tool Objects", app->combineOptions.tools,
+                            ObjectPickMode::CombineTools, app);
+
+    ImGui::Separator();
+    if (ImGui::Button("Apply")) {
+      if (app->combineOptions.operation == BooleanOp::Subtract) {
+        app->status = "Combine subtract requires mesh-boolean backend (not implemented yet)";
+      } else if (!applyAddCombine(app, app->combineOptions.targets,
+                                  app->combineOptions.tools,
+                                  app->combineOptions.keepTools)) {
+        app->status = "Combine add requires at least one target and one tool";
+      } else {
+        app->status = "Combine add complete";
+      }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Close")) {
+      app->combineOptions.visible = false;
+      if (app->objectPickMode == ObjectPickMode::CombineTargets ||
+          app->objectPickMode == ObjectPickMode::CombineTools) {
+        app->objectPickMode = ObjectPickMode::None;
+      }
+    }
+  }
+  ImGui::End();
+
+  app->combineOptions.visible = open;
+  if (!app->combineOptions.visible &&
+      (app->objectPickMode == ObjectPickMode::CombineTargets ||
+       app->objectPickMode == ObjectPickMode::CombineTools)) {
+    app->objectPickMode = ObjectPickMode::None;
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -486,7 +761,18 @@ int main() {
       if (!profiles.empty()) {
         app.extrudeTool.begin(std::move(profiles), app.activePlane);
         app.camera.snap(CameraController::Orientation::Isometric);
-        app.status = "Drag or type distance, then Confirm";
+        app.extrudeOptions.visible = true;
+        app.extrudeOptions.applyRequested = false;
+        app.extrudeOptions.operation = BooleanOp::Add;
+        app.extrudeOptions.targets.clear();
+        if (app.selectedObject >= 0) {
+          addUniqueIndex(app.extrudeOptions.targets, app.selectedObject);
+        }
+        std::snprintf(app.extrudeOptions.depthBuffer,
+                      sizeof(app.extrudeOptions.depthBuffer),
+                      "%.3f", fromMm(app.extrudeTool.distance(), app.project.defaultUnit));
+        app.objectPickMode = ObjectPickMode::None;
+        app.status = "Set depth/op and target objects in Extrude Options";
       } else {
         app.status = "Selection does not form a closed profile";
       }
@@ -533,13 +819,8 @@ int main() {
 
     // Handle extrude confirm.
     if (toolbarAction.extrudeConfirmed && app.extrudeTool.active()) {
-      StlMesh extruded = app.extrudeTool.confirm();
-      if (!extruded.empty()) {
-        app.sceneObjects.push_back(std::move(extruded));
-        app.selectedObject = static_cast<int>(app.sceneObjects.size()) - 1;
-        rebuildCombinedMesh(&app);
-        app.status = "Extruded (click to select, File > Export STL to save)";
-      }
+      app.extrudeOptions.visible = true;
+      app.extrudeOptions.applyRequested = true;
     }
 
     // WantCaptureMouse is true when ImGui has focus (e.g. hovering a window,
@@ -659,6 +940,41 @@ int main() {
           }
         }
 
+      } else if (app.objectPickMode != ObjectPickMode::None) {
+        // --- Object-pick mode for Extrude/Combine lists ---
+        if (leftDown && !app.wasLeftDown) {
+          app.dragStartScreen = {static_cast<float>(x), static_cast<float>(y)};
+        } else if (!leftDown && app.wasLeftDown) {
+          const glm::vec2 cur(static_cast<float>(x), static_cast<float>(y));
+          if (glm::dot(cur - app.dragStartScreen, cur - app.dragStartScreen) <
+              kDragThresholdSq) {
+            int fbW = 0, fbH = 0;
+            glfwGetFramebufferSize(window, &fbW, &fbH);
+            const glm::mat4 view = app.camera.viewMatrix();
+            const glm::mat4 proj =
+                app.camera.projectionMatrix(app.renderer.framebufferAspect());
+
+            glm::vec3 rayO, rayD;
+            screenToRay(static_cast<float>(x), static_cast<float>(y),
+                        static_cast<float>(fbW), static_cast<float>(fbH),
+                        view, proj, rayO, rayD);
+
+            const int hit = pickObject(app, rayO, rayD);
+            if (hit >= 0) {
+              if (app.objectPickMode == ObjectPickMode::ExtrudeTargets) {
+                addUniqueIndex(app.extrudeOptions.targets, hit);
+                app.status = "Added object to extrude target list";
+              } else if (app.objectPickMode == ObjectPickMode::CombineTargets) {
+                addUniqueIndex(app.combineOptions.targets, hit);
+                app.status = "Added object to combine target list";
+              } else if (app.objectPickMode == ObjectPickMode::CombineTools) {
+                addUniqueIndex(app.combineOptions.tools, hit);
+                app.status = "Added object to combine tool list";
+              }
+            }
+          }
+        }
+
       } else {
         // --- 3D orbit camera + object picking ---
         if (leftDown && !app.wasLeftDown) {
@@ -706,8 +1022,12 @@ int main() {
 
     // Escape key: cancel extrude, cancel active tool, or exit sketch mode.
     if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
-      if (app.extrudeTool.active()) {
+      if (app.objectPickMode != ObjectPickMode::None) {
+        app.objectPickMode = ObjectPickMode::None;
+        app.status = "Selection mode cancelled";
+      } else if (app.extrudeTool.active()) {
         app.extrudeTool.cancel();
+        app.extrudeOptions.visible = false;
         app.status = "Extrude cancelled";
       } else if (app.sketchTool.activeTool() != Tool::None) {
         app.sketchTool.cancel();
@@ -842,6 +1162,8 @@ int main() {
     drawPanel(&app);
     drawAppSettingsWindow(&app);
     drawProjectSettingsWindow(&app);
+    drawExtrudeOptionsWindow(&app);
+    drawCombineWindow(&app);
 
     // --- File browser (modal — drawn every frame while visible) ---
     if (app.fileBrowser.isVisible()) {
