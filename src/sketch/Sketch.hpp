@@ -72,6 +72,18 @@ class Sketch {
   void appendConstraintLabels(std::vector<SketchDimensionLabel>& labels, SketchPlane plane,
                               Unit unit) const;
 
+  // --- Undo / Redo ---
+  // Push the current state onto the undo stack (called automatically before mutations).
+  void undoPush();
+  bool canUndo() const;
+  bool canRedo() const;
+  void undo();
+  void redo();
+
+  // --- Direct state access (for serialization / history replay) ---
+  // Returns a non-const reference so that replay code can overwrite the state.
+  std::vector<SketchConstraint>& constraints();
+
  private:
   void applyOneConstraint(const SketchConstraint& c);
   void updateConstraintStatus();
@@ -79,4 +91,13 @@ class Sketch {
   std::vector<SketchElement> elements_;
   std::vector<SketchConstraint> constraints_;
   std::vector<bool> selected_;
+
+  // Undo / redo stacks. Each entry is a full snapshot of (elements_, constraints_).
+  struct SketchSnapshot {
+    std::vector<SketchElement> elements;
+    std::vector<SketchConstraint> constraints;
+  };
+  static constexpr size_t kMaxUndoLevels = 100;
+  std::vector<SketchSnapshot> undoStack_;
+  std::vector<SketchSnapshot> redoStack_;
 };

@@ -56,6 +56,11 @@ class VulkanRenderer {
 
   float framebufferAspect() const;
 
+  // Read back the last rendered frame as RGBA8 pixels.
+  // Must be called after waitIdle() (or outside an active drawFrame call).
+  bool captureFramebuffer(std::vector<uint8_t>& rgbaOut, uint32_t& width, uint32_t& height,
+                          std::string& error);
+
  private:
   // CPU-side handles for GPU buffer allocations.
   struct Buffer {
@@ -205,6 +210,7 @@ class VulkanRenderer {
   static constexpr size_t kFramesInFlight = 2;
   std::vector<FrameSync> syncObjects_;
   size_t currentFrame_ = 0;
+  uint32_t lastImageIndex_ = 0;
 
   bool validationEnabled_ = false;
   bool supportsWireframe_ = false;

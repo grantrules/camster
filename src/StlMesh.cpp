@@ -109,6 +109,82 @@ bool StlMesh::loadFromFile(const std::string& path, std::string& error) {
   return loadAscii(text, error);
 }
 
+bool StlMesh::loadFromMemory(const std::vector<uint8_t>& data, std::string& error) {
+  error.clear();
+  vertices_.clear();
+  indices_.clear();
+
+  if (data.empty()) {
+    error = "STL data is empty.";
+    return false;
+  }
+
+  bool isBinary = false;
+  if (data.size() >= 84) {
+    const uint32_t triangles = readLE<uint32_t>(data.data() + 80);
+    const uint64_t expected = 84ull + static_cast<uint64_t>(triangles) * 50ull;
+    if (expected == data.size()) {
+      isBinary = true;
+    }
+  }
+
+  if (isBinary) {
+    return loadBinary(data, error);
+  }
+
+  const std::string text(data.begin(), data.end());
+  return loadAscii(text, error);
+}
+
+bool StlMesh::saveAsBinaryToMemory(std::vector<uint8_t>& out, std::string& error) const {
+  error.clear();
+
+  if (indices_.size() % 3 != 0 || vertices_.empty()) {
+    error = "Mesh has no triangle data to export.";
+    return false;
+  }
+
+  out.clear();
+  out.reserve(84 + (indices_.size() / 3) * 50);
+
+  auto writeBytes = [&](const void* src, size_t n) {
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(src);
+    out.insert(out.end(), p, p + n);
+  };
+
+  std::array<char, 80> header{};
+  const std::string stamp = "camster STL export";
+  std::memcpy(header.data(), stamp.data(), stamp.size());
+  writeBytes(header.data(), header.size());
+
+  const uint32_t triangleCount = static_cast<uint32_t>(indices_.size() / 3);
+  writeBytes(&triangleCount, sizeof(triangleCount));
+
+  for (size_t i = 0; i < indices_.size(); i += 3) {
+    const StlVertex& a = vertices_[indices_[i + 0]];
+    const StlVertex& b = vertices_[indices_[i + 1]];
+    const StlVertex& c = vertices_[indices_[i + 2]];
+    const glm::vec3 n = faceNormal(a.position, b.position, c.position);
+
+    writeBytes(&n.x, sizeof(float));
+    writeBytes(&n.y, sizeof(float));
+    writeBytes(&n.z, sizeof(float));
+    writeBytes(&a.position.x, sizeof(float));
+    writeBytes(&a.position.y, sizeof(float));
+    writeBytes(&a.position.z, sizeof(float));
+    writeBytes(&b.position.x, sizeof(float));
+    writeBytes(&b.position.y, sizeof(float));
+    writeBytes(&b.position.z, sizeof(float));
+    writeBytes(&c.position.x, sizeof(float));
+    writeBytes(&c.position.y, sizeof(float));
+    writeBytes(&c.position.z, sizeof(float));
+
+    const uint16_t attribute = 0;
+    writeBytes(&attribute, sizeof(attribute));
+  }
+  return true;
+}
+
 bool StlMesh::saveAsBinary(const std::string& path, std::string& error) const {
   error.clear();
 

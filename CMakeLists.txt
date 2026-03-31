@@ -59,6 +59,7 @@ set(CAMSTER_SOURCES
   src/AppSettings.cpp
   src/CameraController.cpp
   src/Gizmo.cpp
+  src/History.cpp
   src/StlMesh.cpp
   src/VulkanRenderer.cpp
     src/PrintSettings.cpp

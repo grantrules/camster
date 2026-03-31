@@ -18,7 +18,9 @@ struct StlVertex {
 class StlMesh {
  public:
   bool loadFromFile(const std::string& path, std::string& error);
+  bool loadFromMemory(const std::vector<uint8_t>& data, std::string& error);
   bool saveAsBinary(const std::string& path, std::string& error) const;
+  bool saveAsBinaryToMemory(std::vector<uint8_t>& out, std::string& error) const;
   // Export with uniform scale applied to all vertex positions (e.g. mm→inches).
   bool saveAsBinaryScaled(const std::string& path, float scale, std::string& error) const;
 

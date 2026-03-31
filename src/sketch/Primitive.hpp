@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <optional>
 #include <variant>
 #include <vector>
 
@@ -58,11 +59,19 @@ enum class ConstraintStatus {
   OverConstrained,   // conflicting or redundant constraints
 };
 
+// Reference to the source sketch element that was projected to create this element.
+// Used by the timeline to re-project when the source sketch changes.
+struct SketchElementSource {
+  int sketchIndex = -1;   // index of the source sketch
+  size_t elemIndex = 0;   // index of the source element within that sketch
+};
+
 // Wrapper that adds metadata to a geometric primitive.
 struct SketchElement {
   SketchPrimitive geometry;
   bool construction = false;
   ConstraintStatus status = ConstraintStatus::Unconstrained;
+  std::optional<SketchElementSource> source;  // set when projected from another sketch
 
   // Intrinsic degrees of freedom for this element type.
   int baseDof() const;

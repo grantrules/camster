@@ -132,6 +132,10 @@ Phase 1 is focused on opening files with the in-app file browser.
 - This implementation uses depth attachments and staging uploads for more production-like rendering behavior.
 - Additional hardening options: validation layers, GPU upload batching, and asynchronous asset streaming.
 
+## Project File Format
+
+- `.nut` project format specification: [docs/nut-file-format.md](docs/nut-file-format.md)
+
 ## Vulkan Learning Resources
 
 If you want to understand both Vulkan in general and why this repo is structured the way it is, these are strong references:

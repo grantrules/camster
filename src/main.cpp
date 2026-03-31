@@ -26,7 +26,9 @@
 #include "CameraController.hpp"
 #include "ColorVertex.hpp"
 #include "Gizmo.hpp"
+#include "History.hpp"
 #include "Project.hpp"
+#include "ProjectTypes.hpp"
 #include "PrintSettings.hpp"
 #include "Scene.hpp"
 #include "StlMesh.hpp"
@@ -75,25 +77,6 @@ struct Aabb {
   glm::vec3 min{0.0f};
   glm::vec3 max{0.0f};
   bool valid = false;
-};
-
-struct ObjectMetadata {
-  std::array<char, 64> name{};
-  bool visible = true;
-  bool locked = false;
-};
-
-struct SketchMetadata {
-  std::array<char, 64> name{};
-  bool visible = true;
-  bool locked = false;
-};
-
-struct SketchEntry {
-  Sketch sketch;
-  SketchMetadata meta;
-  SketchPlane plane = SketchPlane::XY;
-  float offsetMm = 0.0f;
 };
 
 struct SketchCreateState {
@@ -222,6 +205,7 @@ struct AppState {
   Toolbar toolbar;
   AppSettings appSettings;
   Project project;
+  Timeline timeline;
   bool showAppSettings = false;
   bool showProjectSettings = false;
 
@@ -327,6 +311,19 @@ void snapCameraToPlane(AppState* app, SketchPlane plane) {
   }
 }
 
+std::string objectName(const AppState* app, int idx) {
+  if (idx >= 0 && idx < static_cast<int>(app->sceneObjectMeta.size()))
+    return std::string(app->sceneObjectMeta[idx].name.data());
+  return {};
+}
+
+std::vector<std::string> objectNames(const AppState* app, const std::vector<int>& indices) {
+  std::vector<std::string> names;
+  names.reserve(indices.size());
+  for (int i : indices) names.push_back(objectName(app, i));
+  return names;
+}
+
 void createSketch(AppState* app, SketchPlane plane, float offsetMm) {
   SketchEntry entry;
   setName(entry.meta.name, "Sketch " + std::to_string(app->nextSketchNumber++));
@@ -334,6 +331,13 @@ void createSketch(AppState* app, SketchPlane plane, float offsetMm) {
   entry.meta.locked = false;
   entry.plane = plane;
   entry.offsetMm = offsetMm;
+
+  CreateSketchAction action;
+  action.plane = plane;
+  action.offsetMm = offsetMm;
+  action.name = std::string(entry.meta.name.data());
+  app->timeline.push(std::move(action), "Create " + std::string(entry.meta.name.data()));
+
   app->sketches.push_back(std::move(entry));
   app->activeSketchIndex = static_cast<int>(app->sketches.size()) - 1;
   app->browserSelectedSketches.assign(1, app->activeSketchIndex);
@@ -940,13 +944,22 @@ void appendGrid(std::vector<ColorVertex>& lines, SketchPlane plane, float extent
 }
 
 void exitSketchMode(AppState* app) {
+  if (app->hasActiveSketch()) {
+    const auto& sketch = app->activeSketch();
+    const auto& entry = app->sketches[app->activeSketchIndex];
+    EditSketchAction action;
+    action.sketchIndex = app->activeSketchIndex;
+    action.sketchName = std::string(entry.meta.name.data());
+    action.elements = sketch.elements();
+    action.constraints = sketch.constraints();
+    app->timeline.push(std::move(action),
+                       "Edit " + std::string(entry.meta.name.data()));
+    app->activeSketch().clearSelection();
+  }
   app->sceneMode = SceneMode::View3D;
   app->sketchTool.cancel();
   app->sketchTool.setTool(Tool::None);
   app->extrudeTool.cancel();
-  if (app->hasActiveSketch()) {
-    app->activeSketch().clearSelection();
-  }
 }
 
 void drawMenuBar(AppState* app) {
@@ -1699,11 +1712,36 @@ void drawExtrudeOptionsWindow(AppState* app) {
         app->status = "Extrude: enter a valid depth";
       } else {
         app->extrudeTool.setDistance(parsed->valueMm);
+        const bool subtract = (app->extrudeOptions.operation == BooleanOp::Subtract);
+        const auto profiles = app->extrudeTool.profiles();
+        const auto extrudePlane = app->extrudeTool.plane();
+        const float depthMm = parsed->valueMm;
         StlMesh extruded = app->extrudeTool.confirm();
-        if (app->extrudeOptions.operation == BooleanOp::Subtract) {
+
+        auto recordExtrude = [&]() {
+          ExtrudeAction ea;
+          ea.sketchIndex = app->activeSketchIndex;
+          if (app->hasActiveSketch())
+            ea.sketchName = std::string(app->sketches[app->activeSketchIndex].meta.name.data());
+          ea.profiles = profiles;
+          ea.plane = extrudePlane;
+          ea.sketchOffsetMm = app->hasActiveSketch()
+                                  ? app->sketches[app->activeSketchIndex].offsetMm
+                                  : 0.0f;
+          ea.depthMm = depthMm;
+          ea.subtract = subtract;
+          ea.targetObjectNames = objectNames(app, app->extrudeOptions.targets);
+          ea.resultObjectName = objectName(
+              app, static_cast<int>(app->sceneObjects.size()) - 1);
+          app->timeline.push(std::move(ea),
+                             std::string(subtract ? "Subtract Extrude" : "Add Extrude"));
+        };
+
+        if (subtract) {
           if (!applySubtractExtrude(app, extruded, app->extrudeOptions.targets)) {
             app->status = "Extrude subtract removed no target objects";
           } else {
+            recordExtrude();
             app->status = "Extrude subtract complete (object-level)";
           }
           app->extrudeOptions.visible = false;
@@ -1712,6 +1750,7 @@ void drawExtrudeOptionsWindow(AppState* app) {
           if (!applyAddExtrude(app, extruded, app->extrudeOptions.targets)) {
             app->status = "Extrude failed";
           } else {
+            recordExtrude();
             app->status = "Extrude add complete";
             app->extrudeOptions.visible = false;
             app->objectPickMode = ObjectPickMode::None;
@@ -1753,12 +1792,29 @@ void drawCombineWindow(AppState* app) {
 
     ImGui::Separator();
     if (ImGui::Button("Apply")) {
-      if (app->combineOptions.operation == BooleanOp::Subtract) {
+      const bool subtract = (app->combineOptions.operation == BooleanOp::Subtract);
+      auto targetNamesBefore = objectNames(app, app->combineOptions.targets);
+      auto toolNamesBefore = objectNames(app, app->combineOptions.tools);
+
+      auto recordCombine = [&]() {
+        CombineAction ca;
+        ca.subtract = subtract;
+        ca.keepTools = app->combineOptions.keepTools;
+        ca.targetNames = targetNamesBefore;
+        ca.toolNames = toolNamesBefore;
+        ca.resultObjectName = objectName(
+            app, static_cast<int>(app->sceneObjects.size()) - 1);
+        app->timeline.push(std::move(ca),
+                           std::string(subtract ? "Subtract Combine" : "Add Combine"));
+      };
+
+      if (subtract) {
         if (!applySubtractCombine(app, app->combineOptions.targets,
                                   app->combineOptions.tools,
                                   app->combineOptions.keepTools)) {
           app->status = "Combine subtract removed no target objects";
         } else {
+          recordCombine();
           app->status = "Combine subtract complete (object-level)";
         }
       } else if (!applyAddCombine(app, app->combineOptions.targets,
@@ -1766,6 +1822,7 @@ void drawCombineWindow(AppState* app) {
                                   app->combineOptions.keepTools)) {
         app->status = "Combine add requires at least one target and one tool";
       } else {
+        recordCombine();
         app->status = "Combine add complete";
       }
     }
@@ -2243,6 +2300,23 @@ int main() {
       } else if (app.activeSketch().hasSelection()) {
         app.activeSketch().deleteSelected();
         app.status = "Deleted selected elements";
+      }
+    }
+
+    // Ctrl+Z / Ctrl+Shift+Z: sketch undo / redo.
+    if (!io.WantCaptureKeyboard && app.sceneMode == SceneMode::Sketch && app.hasActiveSketch() &&
+        !app.activeSketchLocked() &&
+        (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
+         glfwGetKey(window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS) &&
+        glfwGetKey(window, GLFW_KEY_Z) == GLFW_PRESS) {
+      const bool shift = (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
+                          glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS);
+      if (shift && app.activeSketch().canRedo()) {
+        app.activeSketch().redo();
+        app.status = "Redo";
+      } else if (!shift && app.activeSketch().canUndo()) {
+        app.activeSketch().undo();
+        app.status = "Undo";
       }
     }
 

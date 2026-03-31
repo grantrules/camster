@@ -340,12 +340,14 @@ float primLength(const SketchPrimitive& prim) {
 // --- Element management ---
 
 void Sketch::addPrimitive(SketchPrimitive prim) {
-  elements_.push_back(SketchElement{std::move(prim), false, ConstraintStatus::Unconstrained});
+  elements_.push_back(
+      SketchElement{std::move(prim), false, ConstraintStatus::Unconstrained, std::nullopt});
   selected_.push_back(false);
   updateConstraintStatus();
 }
 
 void Sketch::addCompletedPrimitive(CompletedSketchPrimitive prim) {
+  undoPush();
   const size_t elemIndex = elements_.size();
   addPrimitive(std::move(prim.geometry));
   for (const auto& dim : prim.dimensions) {
@@ -373,6 +375,7 @@ void Sketch::addElement(SketchElement elem) {
 }
 
 void Sketch::deleteSelected() {
+  undoPush();
   // Collect indices to remove (sorted descending for safe erasure).
   std::vector<size_t> toRemove;
   for (size_t i = 0; i < selected_.size(); ++i) {
@@ -433,6 +436,7 @@ void Sketch::deleteSelected() {
 }
 
 void Sketch::clear() {
+  undoPush();
   elements_.clear();
   constraints_.clear();
   selected_.clear();
@@ -456,6 +460,7 @@ std::vector<SketchPrimitive> Sketch::primitives() const {
 // --- Construction toggle ---
 
 void Sketch::toggleConstruction(size_t idx) {
+  undoPush();
   if (idx < elements_.size()) {
     elements_[idx].construction = !elements_[idx].construction;
   }
@@ -565,6 +570,8 @@ void Sketch::addConstraint(SketchConstraint c) {
 
 const std::vector<SketchConstraint>& Sketch::constraints() const { return constraints_; }
 
+std::vector<SketchConstraint>& Sketch::constraints() { return constraints_; }
+
 void Sketch::solveConstraints() {
   // Re-apply all constraints (simple single-pass solver).
   for (const auto& c : constraints_) {
@@ -576,6 +583,7 @@ void Sketch::solveConstraints() {
 std::string Sketch::applyConstraintToSelection(ConstraintTool tool, float valueMm) {
   auto sel = selectedIndices();
   if (sel.empty()) return "Nothing selected";
+  undoPush();
 
   switch (tool) {
     case ConstraintTool::Horizontal:
@@ -918,6 +926,41 @@ void Sketch::appendConstraintLabels(std::vector<SketchDimensionLabel>& labels, S
 }
 
 // --- DOF tracking ---
+
+// --- Undo / Redo ---
+
+void Sketch::undoPush() {
+  undoStack_.push_back({elements_, constraints_});
+  if (undoStack_.size() > kMaxUndoLevels) {
+    undoStack_.erase(undoStack_.begin());
+  }
+  redoStack_.clear();
+}
+
+bool Sketch::canUndo() const { return !undoStack_.empty(); }
+bool Sketch::canRedo() const { return !redoStack_.empty(); }
+
+void Sketch::undo() {
+  if (undoStack_.empty()) return;
+  redoStack_.push_back({elements_, constraints_});
+  auto snap = std::move(undoStack_.back());
+  undoStack_.pop_back();
+  elements_ = std::move(snap.elements);
+  constraints_ = std::move(snap.constraints);
+  selected_.assign(elements_.size(), false);
+  solveConstraints();
+}
+
+void Sketch::redo() {
+  if (redoStack_.empty()) return;
+  undoStack_.push_back({elements_, constraints_});
+  auto snap = std::move(redoStack_.back());
+  redoStack_.pop_back();
+  elements_ = std::move(snap.elements);
+  constraints_ = std::move(snap.constraints);
+  selected_.assign(elements_.size(), false);
+  solveConstraints();
+}
 
 void Sketch::updateConstraintStatus() {
   // Count DOF reductions per element.
