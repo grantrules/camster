@@ -1,6 +1,7 @@
 #include "ui/UIWindows.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <cmath>
 #include <string>
 #include <type_traits>
@@ -11,6 +12,7 @@
 
 #include "Units.hpp"
 #include "core/AppLogic.hpp"
+#include "sketch/Extrude.hpp"
 #include "sketch/Profile.hpp"
 
 namespace {
@@ -154,6 +156,30 @@ int findCreateEntryIndexForSketch(const Timeline& timeline, int sketchIndex) {
   }
   return -1;
 }
+
+bool pointInPolygon2D(glm::vec2 pt, const std::vector<glm::vec2>& poly) {
+  size_t n = poly.size();
+  if (n > 0 && glm::length(poly.front() - poly.back()) < 0.001f) --n;
+  if (n < 3) return false;
+  bool inside = false;
+  for (size_t i = 0, j = n - 1; i < n; j = i++) {
+    const glm::vec2& a = poly[i];
+    const glm::vec2& b = poly[j];
+    const bool intersect = ((a.y > pt.y) != (b.y > pt.y)) &&
+                           (pt.x < (b.x - a.x) * (pt.y - a.y) / ((b.y - a.y) + 1e-12f) + a.x);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+glm::vec2 centroid2D(const std::vector<glm::vec2>& poly) {
+  size_t n = poly.size();
+  if (n > 0 && glm::length(poly.front() - poly.back()) < 0.001f) --n;
+  if (n == 0) return {0.0f, 0.0f};
+  glm::vec2 c{0.0f, 0.0f};
+  for (size_t i = 0; i < n; ++i) c += poly[i];
+  return c / static_cast<float>(n);
+}
 }  // namespace
 
 void drawMenuBar(AppState* app) {
@@ -245,6 +271,70 @@ void drawMenuBar(AppState* app) {
   }
 
   ImGui::EndMainMenuBar();
+}
+
+void drawSolidToolbar(AppState* app) {
+  if (app->sceneMode != SceneMode::View3D) return;
+
+  const float menuBarHeight = ImGui::GetFrameHeight();
+  ImGui::SetNextWindowPos(ImVec2(0.0f, menuBarHeight), ImGuiCond_Always);
+  ImGui::SetNextWindowSize(ImVec2(ImGui::GetIO().DisplaySize.x, 0.0f), ImGuiCond_Always);
+  ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                           ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar |
+                           ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize;
+  ImGui::Begin("##solidToolbar", nullptr, flags);
+
+  const bool hasSketch = !app->sketches.empty();
+  if (!hasSketch) ImGui::BeginDisabled();
+  if (ImGui::Button("Extrude")) {
+    app->solidExtrudeOptions.visible = true;
+    app->solidExtrudeOptions.sourceSketch =
+        app->browserSelectedSketches.empty()
+            ? (static_cast<int>(app->sketches.size()) - 1)
+            : app->browserSelectedSketches.front();
+    app->solidExtrudeOptions.profileSelected.clear();
+    std::snprintf(app->solidExtrudeOptions.depthBuffer,
+                  sizeof(app->solidExtrudeOptions.depthBuffer), "10.000");
+    app->status = "3D Extrude: pick closed profiles; uncheck inner loops to create holes";
+  }
+  if (!hasSketch) ImGui::EndDisabled();
+
+  ImGui::SameLine();
+  const bool canCombine = app->sceneObjects.size() >= 2;
+  if (!canCombine) ImGui::BeginDisabled();
+  if (ImGui::Button("Combine")) {
+    app->combineOptions.visible = true;
+    app->combineOptions.operation = BooleanOp::Add;
+    app->combineOptions.keepTools = false;
+    app->combineOptions.targets.clear();
+    app->combineOptions.tools.clear();
+    if (app->selectedObject >= 0) {
+      addUniqueIndex(app->combineOptions.targets, app->selectedObject);
+    }
+    app->objectPickMode = ObjectPickMode::None;
+  }
+  if (!canCombine) ImGui::EndDisabled();
+
+  ImGui::SameLine();
+  const bool hasSelectedObject = app->selectedObject >= 0 &&
+                                 app->selectedObject < static_cast<int>(app->sceneObjects.size());
+  if (!hasSelectedObject) ImGui::BeginDisabled();
+  if (ImGui::Button("Chamfer")) {
+    app->chamferOptions.visible = true;
+    app->chamferOptions.targetObject = app->selectedObject;
+    app->chamferOptions.edges.clear();
+    std::snprintf(app->chamferOptions.distanceBuffer,
+                  sizeof(app->chamferOptions.distanceBuffer), "1.000");
+    app->objectPickMode = ObjectPickMode::ChamferEdges;
+    app->chamferOptions.pickEdges = true;
+    app->status = "Chamfer: click edges on the selected object";
+  }
+  if (!hasSelectedObject) ImGui::EndDisabled();
+
+  ImGui::SameLine();
+  ImGui::TextDisabled("3D Solid Tools");
+
+  ImGui::End();
 }
 
 void drawNewSketchWindow(AppState* app) {
@@ -902,6 +992,118 @@ void drawTimelineWindow(AppState* app) {
   ImGui::End();
 }
 
+void drawSolidExtrudeWindow(AppState* app) {
+  if (!app->solidExtrudeOptions.visible) return;
+  if (app->sceneMode != SceneMode::View3D) return;
+
+  ImGui::SetNextWindowSize(ImVec2(520.0f, 0.0f), ImGuiCond_FirstUseEver);
+  bool open = app->solidExtrudeOptions.visible;
+  if (ImGui::Begin("3D Extrude", &open)) {
+    if (app->sketches.empty()) {
+      ImGui::TextDisabled("No sketches available.");
+    } else {
+      std::vector<const char*> names;
+      names.reserve(app->sketches.size());
+      for (const auto& sk : app->sketches) names.push_back(sk.meta.name.data());
+
+      int sketchIdx = app->solidExtrudeOptions.sourceSketch;
+      if (sketchIdx < 0 || sketchIdx >= static_cast<int>(app->sketches.size())) {
+        sketchIdx = static_cast<int>(app->sketches.size()) - 1;
+      }
+      if (ImGui::Combo("Source Sketch", &sketchIdx, names.data(), static_cast<int>(names.size()))) {
+        app->solidExtrudeOptions.profileSelected.clear();
+      }
+      app->solidExtrudeOptions.sourceSketch = sketchIdx;
+
+      const auto& entry = app->sketches[sketchIdx];
+      const auto profiles = entry.sketch.closedProfiles();
+      if (app->solidExtrudeOptions.profileSelected.size() != profiles.size()) {
+        app->solidExtrudeOptions.profileSelected.assign(profiles.size(), true);
+      }
+
+      ImGui::Text("Closed Profiles: %d", static_cast<int>(profiles.size()));
+      ImGui::TextDisabled("Tip: uncheck inner loops to keep holes.");
+      ImGui::BeginChild("##extrudeProfiles", ImVec2(0.0f, 170.0f), true);
+      for (size_t i = 0; i < profiles.size(); ++i) {
+        std::string label = "Profile " + std::to_string(i + 1);
+        bool checked = app->solidExtrudeOptions.profileSelected[i];
+        if (ImGui::Checkbox(label.c_str(), &checked)) {
+          app->solidExtrudeOptions.profileSelected[i] = checked;
+        }
+      }
+      ImGui::EndChild();
+
+      ImGui::Text("Depth:");
+      ImGui::SameLine();
+      ImGui::SetNextItemWidth(140.0f);
+      ImGui::InputText("##solidExtrudeDepth", app->solidExtrudeOptions.depthBuffer,
+                       sizeof(app->solidExtrudeOptions.depthBuffer));
+      ImGui::SameLine();
+      ImGui::TextDisabled("(%s)", unitSuffix(app->project.defaultUnit));
+
+      if (ImGui::Button("Apply Extrude")) {
+        auto parsed = parseDimension(std::string(app->solidExtrudeOptions.depthBuffer),
+                                     app->project.defaultUnit);
+        if (!parsed) {
+          app->status = "Extrude: enter a valid depth";
+        } else {
+          std::vector<std::vector<glm::vec2>> selected;
+          std::vector<std::vector<glm::vec2>> holes;
+          selected.reserve(profiles.size());
+          holes.reserve(profiles.size());
+
+          for (size_t i = 0; i < profiles.size(); ++i) {
+            if (app->solidExtrudeOptions.profileSelected[i]) {
+              selected.push_back(profiles[i]);
+            }
+          }
+          for (size_t i = 0; i < profiles.size(); ++i) {
+            if (app->solidExtrudeOptions.profileSelected[i]) continue;
+            const glm::vec2 c = centroid2D(profiles[i]);
+            bool inSelected = false;
+            for (const auto& s : selected) {
+              if (pointInPolygon2D(c, s)) {
+                inSelected = true;
+                break;
+              }
+            }
+            if (inSelected) holes.push_back(profiles[i]);
+          }
+
+          if (selected.empty()) {
+            app->status = "Extrude: select at least one closed profile";
+          } else {
+            StlMesh extruded = extrudeMesh(selected, entry.plane, parsed->valueMm, holes);
+            if (extruded.empty() || !applyAddExtrude(app, extruded, {})) {
+              app->status = "Extrude failed";
+            } else {
+              ExtrudeAction ea;
+              ea.sketchIndex = sketchIdx;
+              ea.sketchName = std::string(entry.meta.name.data());
+              ea.profiles = selected;
+              ea.plane = entry.plane;
+              ea.sketchOffsetMm = entry.offsetMm;
+              ea.depthMm = parsed->valueMm;
+              ea.subtract = false;
+              ea.resultObjectName = objectName(app, static_cast<int>(app->sceneObjects.size()) - 1);
+              app->timeline.push(std::move(ea), "3D Extrude");
+              app->timelineCursor = app->timeline.size() - 1;
+              app->status = holes.empty() ? "Extrude complete" : "Extrude complete (with holes)";
+              app->solidExtrudeOptions.visible = false;
+            }
+          }
+        }
+      }
+      ImGui::SameLine();
+      if (ImGui::Button("Close")) {
+        app->solidExtrudeOptions.visible = false;
+      }
+    }
+  }
+  ImGui::End();
+  app->solidExtrudeOptions.visible = open;
+}
+
 void drawExtrudeOptionsWindow(AppState* app) {
   if (!app->extrudeOptions.visible) return;
   if (app->sceneMode != SceneMode::Sketch || !app->hasActiveSketch()) {
@@ -1106,5 +1308,88 @@ void drawCombineWindow(AppState* app) {
       (app->objectPickMode == ObjectPickMode::CombineTargets ||
        app->objectPickMode == ObjectPickMode::CombineTools)) {
     app->objectPickMode = ObjectPickMode::None;
+  }
+}
+
+void drawChamferWindow(AppState* app) {
+  if (!app->chamferOptions.visible) return;
+
+  ImGui::SetNextWindowSize(ImVec2(520.0f, 0.0f), ImGuiCond_FirstUseEver);
+  bool open = app->chamferOptions.visible;
+  if (ImGui::Begin("Chamfer Tool", &open)) {
+    const int obj = app->chamferOptions.targetObject;
+    if (obj < 0 || obj >= static_cast<int>(app->sceneObjects.size())) {
+      ImGui::TextDisabled("No valid target object selected.");
+    } else {
+      ImGui::Text("Target: %s", app->sceneObjectMeta[obj].name.data());
+      ImGui::Text("Selected edges: %d", static_cast<int>(app->chamferOptions.edges.size()));
+    }
+
+    ImGui::Text("Chamfer Distance:");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(140.0f);
+    ImGui::InputText("##chamferDistance", app->chamferOptions.distanceBuffer,
+                     sizeof(app->chamferOptions.distanceBuffer));
+    ImGui::SameLine();
+    ImGui::TextDisabled("(%s)", unitSuffix(app->project.defaultUnit));
+
+    if (ImGui::Button(app->chamferOptions.pickEdges ? "Stop Edge Pick" : "Pick Edges")) {
+      app->chamferOptions.pickEdges = !app->chamferOptions.pickEdges;
+      app->objectPickMode = app->chamferOptions.pickEdges ? ObjectPickMode::ChamferEdges
+                                                          : ObjectPickMode::None;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Clear Edges")) {
+      app->chamferOptions.edges.clear();
+    }
+
+    ImGui::Separator();
+    ImGui::BeginChild("##chamferEdges", ImVec2(0.0f, 140.0f), true);
+    int eraseIdx = -1;
+    for (int i = 0; i < static_cast<int>(app->chamferOptions.edges.size()); ++i) {
+      const auto& e = app->chamferOptions.edges[i];
+      ImGui::PushID(i);
+      if (ImGui::SmallButton("x")) eraseIdx = i;
+      ImGui::SameLine();
+      ImGui::Text("Edge %d  (%.2f, %.2f, %.2f) -> (%.2f, %.2f, %.2f)", i + 1,
+                  e.a.x, e.a.y, e.a.z, e.b.x, e.b.y, e.b.z);
+      ImGui::PopID();
+    }
+    if (eraseIdx >= 0) {
+      app->chamferOptions.edges.erase(app->chamferOptions.edges.begin() + eraseIdx);
+    }
+    ImGui::EndChild();
+
+    ImGui::Separator();
+    if (ImGui::Button("Apply Chamfer")) {
+      auto parsed = parseDimension(std::string(app->chamferOptions.distanceBuffer),
+                                   app->project.defaultUnit);
+      if (!parsed) {
+        app->status = "Chamfer: enter a valid distance";
+      } else if (!applyChamferEdges(app, app->chamferOptions.targetObject,
+                                    app->chamferOptions.edges, parsed->valueMm)) {
+        app->status = "Chamfer failed (select edges on an unlocked object)";
+      } else {
+        app->status = "Chamfer applied";
+        app->chamferOptions.visible = false;
+        app->chamferOptions.pickEdges = false;
+        app->objectPickMode = ObjectPickMode::None;
+      }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Close")) {
+      app->chamferOptions.visible = false;
+      app->chamferOptions.pickEdges = false;
+      if (app->objectPickMode == ObjectPickMode::ChamferEdges) {
+        app->objectPickMode = ObjectPickMode::None;
+      }
+    }
+  }
+  ImGui::End();
+
+  app->chamferOptions.visible = open;
+  if (!app->chamferOptions.visible && app->objectPickMode == ObjectPickMode::ChamferEdges) {
+    app->objectPickMode = ObjectPickMode::None;
+    app->chamferOptions.pickEdges = false;
   }
 }

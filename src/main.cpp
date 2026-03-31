@@ -86,6 +86,107 @@ std::optional<ImVec2> projectToScreen(glm::vec3 world, const glm::mat4& view,
                 (ndc.y * 0.5f + 0.5f) * viewportSize.y);
 }
 
+struct EdgePickResult {
+  bool hit = false;
+  ChamferEdgeSelection edge;
+  float distance = std::numeric_limits<float>::max();
+};
+
+float raySegmentDistance(glm::vec3 rayO, glm::vec3 rayD,
+                         glm::vec3 a, glm::vec3 b, float* rayTOut) {
+  const glm::vec3 u = rayD;
+  const glm::vec3 v = b - a;
+  const glm::vec3 w0 = rayO - a;
+
+  const float aDot = glm::dot(u, u);
+  const float bDot = glm::dot(u, v);
+  const float cDot = glm::dot(v, v);
+  const float dDot = glm::dot(u, w0);
+  const float eDot = glm::dot(v, w0);
+  const float denom = aDot * cDot - bDot * bDot;
+
+  float s = 0.0f;
+  float t = 0.0f;
+  if (std::abs(denom) > 1e-8f) {
+    s = (bDot * eDot - cDot * dDot) / denom;
+    t = (aDot * eDot - bDot * dDot) / denom;
+  }
+
+  s = std::max(0.0f, s);
+  t = std::clamp(t, 0.0f, 1.0f);
+
+  const glm::vec3 pRay = rayO + s * u;
+  const glm::vec3 pSeg = a + t * v;
+  if (rayTOut) *rayTOut = s;
+  return glm::length(pRay - pSeg);
+}
+
+EdgePickResult pickChamferEdge(const AppState& app, int objectIndex, glm::vec3 rayO, glm::vec3 rayD) {
+  EdgePickResult best;
+  if (objectIndex < 0 || objectIndex >= static_cast<int>(app.sceneObjects.size())) return best;
+
+  const auto& mesh = app.sceneObjects[objectIndex];
+  const auto& verts = mesh.vertices();
+  const auto& inds = mesh.indices();
+  if (verts.empty() || inds.empty()) return best;
+
+  glm::vec3 bmin = verts[0].position;
+  glm::vec3 bmax = verts[0].position;
+  for (const auto& v : verts) {
+    bmin = glm::min(bmin, v.position);
+    bmax = glm::max(bmax, v.position);
+  }
+  const float pickThreshold = std::max(0.5f, glm::length(bmax - bmin) * 0.01f);
+
+  struct QuantEdgeKey {
+    long long ax, ay, az;
+    long long bx, by, bz;
+  };
+  auto q = [](float v) { return static_cast<long long>(std::llround(v * 1000.0f)); };
+  auto makeKey = [&](glm::vec3 a, glm::vec3 b) {
+    bool swap = (a.x > b.x) ||
+                (a.x == b.x && a.y > b.y) ||
+                (a.x == b.x && a.y == b.y && a.z > b.z);
+    if (swap) std::swap(a, b);
+    return QuantEdgeKey{q(a.x), q(a.y), q(a.z), q(b.x), q(b.y), q(b.z)};
+  };
+  auto sameKey = [](const QuantEdgeKey& lhs, const QuantEdgeKey& rhs) {
+    return lhs.ax == rhs.ax && lhs.ay == rhs.ay && lhs.az == rhs.az &&
+           lhs.bx == rhs.bx && lhs.by == rhs.by && lhs.bz == rhs.bz;
+  };
+
+  std::vector<QuantEdgeKey> seen;
+  seen.reserve(inds.size());
+
+  auto testEdge = [&](glm::vec3 a, glm::vec3 b) {
+    const QuantEdgeKey key = makeKey(a, b);
+    for (const auto& k : seen) {
+      if (sameKey(k, key)) return;
+    }
+    seen.push_back(key);
+
+    float rayT = 0.0f;
+    const float d = raySegmentDistance(rayO, rayD, a, b, &rayT);
+    if (rayT > 0.0f && d <= pickThreshold && d < best.distance) {
+      best.hit = true;
+      best.distance = d;
+      best.edge.objectIndex = objectIndex;
+      best.edge.a = a;
+      best.edge.b = b;
+    }
+  };
+
+  for (size_t i = 0; i + 2 < inds.size(); i += 3) {
+    const glm::vec3 a = verts[inds[i + 0]].position;
+    const glm::vec3 b = verts[inds[i + 1]].position;
+    const glm::vec3 c = verts[inds[i + 2]].position;
+    testEdge(a, b);
+    testEdge(b, c);
+    testEdge(c, a);
+  }
+  return best;
+}
+
 }  // namespace
 
 int main() {
@@ -121,9 +222,8 @@ int main() {
   app.project.initFromAppSettings(app.appSettings);
   app.printSettings.load();
 
-  appendSceneObject(&app, StlMesh::makeUnitCube());
-  app.selectedObject = 0;
-  app.browserSelectedObjects.assign(1, 0);
+  app.selectedObject = -1;
+  app.browserSelectedObjects.clear();
   rebuildCombinedMesh(&app);
 
   while (!glfwWindowShouldClose(window)) {
@@ -153,6 +253,7 @@ int main() {
 
     // --- Menu bar (always visible) ---
     drawMenuBar(&app);
+    drawSolidToolbar(&app);
 
     // --- Toolbar (sketch mode only) ---
     ToolbarAction toolbarAction;
@@ -484,7 +585,39 @@ int main() {
                         view, proj, rayO, rayD);
 
             const int hit = pickObject(app, rayO, rayD);
-            if (hit >= 0) {
+            if (app.objectPickMode == ObjectPickMode::ChamferEdges) {
+              const int obj = app.chamferOptions.targetObject >= 0
+                                  ? app.chamferOptions.targetObject
+                                  : app.selectedObject;
+              const EdgePickResult edgePick = pickChamferEdge(app, obj, rayO, rayD);
+              if (edgePick.hit) {
+                auto sameEdge = [](const ChamferEdgeSelection& lhs,
+                                   const ChamferEdgeSelection& rhs) {
+                  const auto near = [](glm::vec3 p, glm::vec3 q) {
+                    const glm::vec3 d = p - q;
+                    return glm::dot(d, d) <= 1e-6f;
+                  };
+                  return lhs.objectIndex == rhs.objectIndex &&
+                         ((near(lhs.a, rhs.a) && near(lhs.b, rhs.b)) ||
+                          (near(lhs.a, rhs.b) && near(lhs.b, rhs.a)));
+                };
+
+                bool removed = false;
+                for (auto it = app.chamferOptions.edges.begin();
+                     it != app.chamferOptions.edges.end(); ++it) {
+                  if (sameEdge(*it, edgePick.edge)) {
+                    app.chamferOptions.edges.erase(it);
+                    removed = true;
+                    app.status = "Chamfer edge removed";
+                    break;
+                  }
+                }
+                if (!removed) {
+                  app.chamferOptions.edges.push_back(edgePick.edge);
+                  app.status = "Chamfer edge selected";
+                }
+              }
+            } else if (hit >= 0) {
               if (app.objectPickMode == ObjectPickMode::ExtrudeTargets) {
                 addUniqueIndex(app.extrudeOptions.targets, hit);
                 app.status = "Added object to extrude target list";
@@ -753,12 +886,14 @@ int main() {
     drawPanel(&app);
     drawObjectBrowserWindow(&app);
     drawTimelineWindow(&app);
+    drawSolidExtrudeWindow(&app);
     drawNewSketchWindow(&app);
     drawProjectToolWindow(&app);
     drawAppSettingsWindow(&app);
     drawProjectSettingsWindow(&app);
     drawExtrudeOptionsWindow(&app);
     drawCombineWindow(&app);
+    drawChamferWindow(&app);
 
     // --- File browser (modal — drawn every frame while visible) ---
     if (app.fileBrowser.isVisible()) {

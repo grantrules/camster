@@ -57,6 +57,9 @@ bool applySubtractExtrude(AppState* app, const StlMesh& extruded,
                           const std::vector<int>& targetsRaw);
 bool applySubtractCombine(AppState* app, const std::vector<int>& targetsRaw,
                           const std::vector<int>& toolsRaw, bool keepTools);
+bool applyChamferEdges(AppState* app, int objectIndex,
+                       const std::vector<ChamferEdgeSelection>& edges,
+                       float distanceMm);
 
 int pickObject(const AppState& app, glm::vec3 rayO, glm::vec3 rayD);
 std::optional<FacePickResult> pickObjectFace(const AppState& app, glm::vec3 rayO, glm::vec3 rayD);

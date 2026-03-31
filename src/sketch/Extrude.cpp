@@ -19,6 +19,31 @@ bool pointInTriangle(glm::vec2 pt, glm::vec2 a, glm::vec2 b, glm::vec2 c) {
   return !(hasNeg && hasPos);
 }
 
+bool pointInPolygon(glm::vec2 pt, const std::vector<glm::vec2>& poly) {
+  size_t n = poly.size();
+  if (n > 0 && glm::length(poly.front() - poly.back()) < 0.001f) --n;
+  if (n < 3) return false;
+
+  bool inside = false;
+  for (size_t i = 0, j = n - 1; i < n; j = i++) {
+    const glm::vec2& a = poly[i];
+    const glm::vec2& b = poly[j];
+    const bool intersect = ((a.y > pt.y) != (b.y > pt.y)) &&
+                           (pt.x < (b.x - a.x) * (pt.y - a.y) / ((b.y - a.y) + 1e-12f) + a.x);
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+glm::vec2 polygonCentroid(const std::vector<glm::vec2>& poly) {
+  size_t n = poly.size();
+  if (n > 0 && glm::length(poly.front() - poly.back()) < 0.001f) --n;
+  if (n == 0) return {0.0f, 0.0f};
+  glm::vec2 c{0.0f, 0.0f};
+  for (size_t i = 0; i < n; ++i) c += poly[i];
+  return c / static_cast<float>(n);
+}
+
 // Ear-clipping triangulation for a simple polygon.
 // Returns index triples into the input point array.
 std::vector<std::array<size_t, 3>> earClip(const std::vector<glm::vec2>& poly) {
@@ -79,7 +104,8 @@ std::vector<std::array<size_t, 3>> earClip(const std::vector<glm::vec2>& poly) {
 }  // namespace
 
 StlMesh extrudeMesh(const std::vector<std::vector<glm::vec2>>& profiles,
-                    SketchPlane plane, float distanceMm) {
+                    SketchPlane plane, float distanceMm,
+                    const std::vector<std::vector<glm::vec2>>& holeProfiles) {
   const glm::vec3 normal = planeNormal(plane);
   const glm::vec3 offset = normal * distanceMm;
 
@@ -100,9 +126,22 @@ StlMesh extrudeMesh(const std::vector<std::vector<glm::vec2>>& profiles,
 
     const auto tris = earClip(profile);
 
-    // Front cap (faces away from extrude direction).
+    // Front cap (faces away from extrude direction).  Skip triangles whose
+    // centroids fall inside any hole polygon contained by this profile.
     const glm::vec3 frontN = (distanceMm >= 0.0f) ? -normal : normal;
     for (const auto& tri : tris) {
+      const glm::vec2 triCenter = (profile[tri[0]] + profile[tri[1]] + profile[tri[2]]) / 3.0f;
+      bool inHole = false;
+      for (const auto& hole : holeProfiles) {
+        const glm::vec2 hCenter = polygonCentroid(hole);
+        if (!pointInPolygon(hCenter, profile)) continue;
+        if (pointInPolygon(triCenter, hole)) {
+          inHole = true;
+          break;
+        }
+      }
+      if (inHole) continue;
+
       const auto base = static_cast<uint32_t>(vertices.size());
       vertices.push_back({front[tri[0]], frontN});
       vertices.push_back({front[tri[1]], frontN});
@@ -115,6 +154,18 @@ StlMesh extrudeMesh(const std::vector<std::vector<glm::vec2>>& profiles,
     // Back cap (reversed winding).
     const glm::vec3 backN = -frontN;
     for (const auto& tri : tris) {
+      const glm::vec2 triCenter = (profile[tri[0]] + profile[tri[1]] + profile[tri[2]]) / 3.0f;
+      bool inHole = false;
+      for (const auto& hole : holeProfiles) {
+        const glm::vec2 hCenter = polygonCentroid(hole);
+        if (!pointInPolygon(hCenter, profile)) continue;
+        if (pointInPolygon(triCenter, hole)) {
+          inHole = true;
+          break;
+        }
+      }
+      if (inHole) continue;
+
       const auto base = static_cast<uint32_t>(vertices.size());
       vertices.push_back({back[tri[2]], backN});
       vertices.push_back({back[tri[1]], backN});
@@ -149,6 +200,44 @@ StlMesh extrudeMesh(const std::vector<std::vector<glm::vec2>>& profiles,
       indices.push_back(base);
       indices.push_back(base + 2);
       indices.push_back(base + 3);
+    }
+  }
+
+  // Hole side walls with inward-facing normals.
+  for (const auto& hole : holeProfiles) {
+    size_t n = hole.size();
+    if (n > 0 && glm::length(hole.front() - hole.back()) < 0.001f) --n;
+    if (n < 3) continue;
+
+    std::vector<glm::vec3> front(n), back(n);
+    for (size_t i = 0; i < n; ++i) {
+      front[i] = toWorld(hole[i], plane);
+      back[i] = front[i] + offset;
+    }
+
+    for (size_t i = 0; i < n; ++i) {
+      const size_t j = (i + 1) % n;
+      const glm::vec3 edge = front[j] - front[i];
+      glm::vec3 sideN = glm::cross(offset, edge);  // inward for hole wall
+      const float sideLen = glm::length(sideN);
+      if (sideLen > 1e-8f) {
+        sideN /= sideLen;
+      } else {
+        sideN = -normal;
+      }
+
+      const auto base = static_cast<uint32_t>(vertices.size());
+      vertices.push_back({front[i], sideN});
+      vertices.push_back({front[j], sideN});
+      vertices.push_back({back[j], sideN});
+      vertices.push_back({back[i], sideN});
+
+      indices.push_back(base);
+      indices.push_back(base + 2);
+      indices.push_back(base + 1);
+      indices.push_back(base);
+      indices.push_back(base + 3);
+      indices.push_back(base + 2);
     }
   }
 

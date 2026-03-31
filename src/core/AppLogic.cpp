@@ -544,6 +544,65 @@ bool applySubtractCombine(AppState* app, const std::vector<int>& targetsRaw,
   return true;
 }
 
+bool applyChamferEdges(AppState* app, int objectIndex,
+                       const std::vector<ChamferEdgeSelection>& edges,
+                       float distanceMm) {
+  if (objectIndex < 0 || objectIndex >= static_cast<int>(app->sceneObjects.size())) return false;
+  if (distanceMm <= 0.0f || edges.empty()) return false;
+  if (objectIndex >= static_cast<int>(app->sceneObjectMeta.size()) ||
+      app->sceneObjectMeta[objectIndex].locked) {
+    return false;
+  }
+
+  const StlMesh& srcMesh = app->sceneObjects[objectIndex];
+  auto verts = srcMesh.vertices();
+  const auto& inds = srcMesh.indices();
+  if (verts.empty() || inds.empty()) return false;
+
+  auto nearPoint = [](const glm::vec3& p, const glm::vec3& q) {
+    const glm::vec3 d = p - q;
+    return glm::dot(d, d) <= 1e-6f;
+  };
+
+  bool changed = false;
+  for (const auto& edge : edges) {
+    if (edge.objectIndex != objectIndex) continue;
+    const float edgeLen = glm::length(edge.b - edge.a);
+    if (edgeLen <= 1e-6f) continue;
+    const float t = std::clamp(distanceMm / edgeLen, 0.0f, 0.45f);
+    if (t <= 0.0f) continue;
+    const glm::vec3 mid = 0.5f * (edge.a + edge.b);
+
+    for (auto& v : verts) {
+      if (nearPoint(v.position, edge.a) || nearPoint(v.position, edge.b)) {
+        v.position = glm::mix(v.position, mid, t);
+        changed = true;
+      }
+    }
+  }
+
+  if (!changed) return false;
+
+  for (size_t i = 0; i + 2 < inds.size(); i += 3) {
+    StlVertex& va = verts[inds[i + 0]];
+    StlVertex& vb = verts[inds[i + 1]];
+    StlVertex& vc = verts[inds[i + 2]];
+    glm::vec3 n = glm::normalize(glm::cross(vb.position - va.position, vc.position - va.position));
+    if (glm::dot(n, n) < 1e-8f) {
+      n = {0.0f, 0.0f, 1.0f};
+    }
+    va.normal = n;
+    vb.normal = n;
+    vc.normal = n;
+  }
+
+  app->sceneObjects[objectIndex] = StlMesh::fromGeometry(std::move(verts), inds);
+  app->selectedObject = objectIndex;
+  app->browserSelectedObjects.assign(1, objectIndex);
+  rebuildCombinedMesh(app);
+  return true;
+}
+
 int pickObject(const AppState& app, glm::vec3 rayO, glm::vec3 rayD) {
   float bestT = std::numeric_limits<float>::max();
   int bestIdx = -1;

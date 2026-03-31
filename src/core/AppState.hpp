@@ -7,6 +7,7 @@
 #include <vector>
 
 #include <glm/vec2.hpp>
+#include <glm/vec3.hpp>
 
 #include "AppSettings.hpp"
 #include "CameraController.hpp"
@@ -29,8 +30,14 @@ class PrintSettings;
 
 enum class BooleanOp { Add, Subtract };
 enum class ExtrudeOp { Add, Subtract, CreateNewObject };
-enum class ObjectPickMode { None, ExtrudeTargets, CombineTargets, CombineTools };
+enum class ObjectPickMode { None, ExtrudeTargets, CombineTargets, CombineTools, ChamferEdges };
 enum class BrowserSection { Objects, Sketches };
+
+struct ChamferEdgeSelection {
+  int objectIndex = -1;
+  glm::vec3 a{0.0f};
+  glm::vec3 b{0.0f};
+};
 
 struct ExtrudeOptionsState {
   bool visible = false;
@@ -46,6 +53,21 @@ struct CombineOptionsState {
   bool keepTools = false;
   std::vector<int> targets;
   std::vector<int> tools;
+};
+
+struct ChamferOptionsState {
+  bool visible = false;
+  bool pickEdges = false;
+  int targetObject = -1;
+  std::vector<ChamferEdgeSelection> edges;
+  char distanceBuffer[64] = {};
+};
+
+struct SolidExtrudeOptionsState {
+  bool visible = false;
+  int sourceSketch = -1;
+  std::vector<bool> profileSelected;
+  char depthBuffer[64] = {};
 };
 
 struct SketchCreateState {
@@ -89,6 +111,8 @@ struct AppState {
   ObjectPickMode objectPickMode = ObjectPickMode::None;
   ExtrudeOptionsState extrudeOptions;
   CombineOptionsState combineOptions;
+  ChamferOptionsState chamferOptions;
+  SolidExtrudeOptionsState solidExtrudeOptions;
 
   // Scene / sketch state.
   SceneMode sceneMode = SceneMode::View3D;
