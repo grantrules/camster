@@ -66,6 +66,12 @@ struct CombineOptionsState {
   std::vector<int> tools;
 };
 
+struct Aabb {
+  glm::vec3 min{0.0f};
+  glm::vec3 max{0.0f};
+  bool valid = false;
+};
+
 void addUniqueIndex(std::vector<int>& list, int idx) {
   if (idx < 0) return;
   if (std::find(list.begin(), list.end(), idx) == list.end()) {
@@ -80,6 +86,31 @@ void sanitizeObjectIndices(std::vector<int>& list, int objectCount) {
              list.end());
   std::sort(list.begin(), list.end());
   list.erase(std::unique(list.begin(), list.end()), list.end());
+}
+
+void eraseIndex(std::vector<int>& list, int idx) {
+  list.erase(std::remove(list.begin(), list.end(), idx), list.end());
+}
+
+Aabb meshAabb(const StlMesh& mesh) {
+  Aabb box;
+  const auto& verts = mesh.vertices();
+  if (verts.empty()) return box;
+  box.min = verts[0].position;
+  box.max = verts[0].position;
+  box.valid = true;
+  for (const auto& v : verts) {
+    box.min = glm::min(box.min, v.position);
+    box.max = glm::max(box.max, v.position);
+  }
+  return box;
+}
+
+bool aabbOverlap(const Aabb& a, const Aabb& b) {
+  if (!a.valid || !b.valid) return false;
+  return a.min.x <= b.max.x && a.max.x >= b.min.x &&
+         a.min.y <= b.max.y && a.max.y >= b.min.y &&
+         a.min.z <= b.max.z && a.max.z >= b.min.z;
 }
 
 struct AppState {
@@ -213,6 +244,9 @@ bool applyAddCombine(AppState* app, const std::vector<int>& targetsRaw,
   std::vector<int> tools = toolsRaw;
   sanitizeObjectIndices(targets, static_cast<int>(app->sceneObjects.size()));
   sanitizeObjectIndices(tools, static_cast<int>(app->sceneObjects.size()));
+  for (int idx : targets) {
+    eraseIndex(tools, idx);
+  }
   if (targets.empty() || tools.empty()) return false;
 
   StlMesh merged;
@@ -234,6 +268,87 @@ bool applyAddCombine(AppState* app, const std::vector<int>& targetsRaw,
 
   app->sceneObjects = std::move(next);
   app->selectedObject = static_cast<int>(app->sceneObjects.size()) - 1;
+  rebuildCombinedMesh(app);
+  return true;
+}
+
+bool applySubtractExtrude(AppState* app, const StlMesh& extruded,
+                          const std::vector<int>& targetsRaw) {
+  if (extruded.empty()) return false;
+
+  std::vector<int> targets = targetsRaw;
+  sanitizeObjectIndices(targets, static_cast<int>(app->sceneObjects.size()));
+  if (targets.empty()) return false;
+
+  const Aabb toolBox = meshAabb(extruded);
+  std::vector<bool> remove(app->sceneObjects.size(), false);
+  for (int idx : targets) {
+    if (aabbOverlap(meshAabb(app->sceneObjects[idx]), toolBox)) {
+      remove[idx] = true;
+    }
+  }
+
+  bool removedAny = false;
+  std::vector<StlMesh> next;
+  next.reserve(app->sceneObjects.size());
+  for (int i = 0; i < static_cast<int>(app->sceneObjects.size()); ++i) {
+    if (remove[i]) {
+      removedAny = true;
+      continue;
+    }
+    next.push_back(std::move(app->sceneObjects[i]));
+  }
+
+  if (!removedAny) return false;
+  app->sceneObjects = std::move(next);
+  app->selectedObject = app->sceneObjects.empty() ? -1 : 0;
+  rebuildCombinedMesh(app);
+  return true;
+}
+
+bool applySubtractCombine(AppState* app, const std::vector<int>& targetsRaw,
+                          const std::vector<int>& toolsRaw, bool keepTools) {
+  std::vector<int> targets = targetsRaw;
+  std::vector<int> tools = toolsRaw;
+  sanitizeObjectIndices(targets, static_cast<int>(app->sceneObjects.size()));
+  sanitizeObjectIndices(tools, static_cast<int>(app->sceneObjects.size()));
+  for (int idx : targets) {
+    eraseIndex(tools, idx);
+  }
+  if (targets.empty() || tools.empty()) return false;
+
+  std::vector<Aabb> toolBoxes;
+  toolBoxes.reserve(tools.size());
+  for (int idx : tools) toolBoxes.push_back(meshAabb(app->sceneObjects[idx]));
+
+  std::vector<bool> remove(app->sceneObjects.size(), false);
+  for (int idx : targets) {
+    const Aabb targetBox = meshAabb(app->sceneObjects[idx]);
+    for (const Aabb& tb : toolBoxes) {
+      if (aabbOverlap(targetBox, tb)) {
+        remove[idx] = true;
+        break;
+      }
+    }
+  }
+  if (!keepTools) {
+    for (int idx : tools) remove[idx] = true;
+  }
+
+  bool removedAny = false;
+  std::vector<StlMesh> next;
+  next.reserve(app->sceneObjects.size());
+  for (int i = 0; i < static_cast<int>(app->sceneObjects.size()); ++i) {
+    if (remove[i]) {
+      removedAny = true;
+      continue;
+    }
+    next.push_back(std::move(app->sceneObjects[i]));
+  }
+
+  if (!removedAny) return false;
+  app->sceneObjects = std::move(next);
+  app->selectedObject = app->sceneObjects.empty() ? -1 : 0;
   rebuildCombinedMesh(app);
   return true;
 }
@@ -600,10 +715,16 @@ void drawExtrudeOptionsWindow(AppState* app) {
         app->status = "Extrude: enter a valid depth";
       } else {
         app->extrudeTool.setDistance(parsed->valueMm);
+        StlMesh extruded = app->extrudeTool.confirm();
         if (app->extrudeOptions.operation == BooleanOp::Subtract) {
-          app->status = "Extrude subtract requires mesh-boolean backend (not implemented yet)";
+          if (!applySubtractExtrude(app, extruded, app->extrudeOptions.targets)) {
+            app->status = "Extrude subtract removed no target objects";
+          } else {
+            app->status = "Extrude subtract complete (object-level)";
+          }
+          app->extrudeOptions.visible = false;
+          app->objectPickMode = ObjectPickMode::None;
         } else {
-          StlMesh extruded = app->extrudeTool.confirm();
           if (!applyAddExtrude(app, extruded, app->extrudeOptions.targets)) {
             app->status = "Extrude failed";
           } else {
@@ -643,9 +764,19 @@ void drawCombineWindow(AppState* app) {
                             ObjectPickMode::CombineTools, app);
 
     ImGui::Separator();
+    ImGui::TextDisabled("Subtract currently uses object-overlap fallback");
+    ImGui::TextDisabled("(removes overlapping targets by AABB)");
+
+    ImGui::Separator();
     if (ImGui::Button("Apply")) {
       if (app->combineOptions.operation == BooleanOp::Subtract) {
-        app->status = "Combine subtract requires mesh-boolean backend (not implemented yet)";
+        if (!applySubtractCombine(app, app->combineOptions.targets,
+                                  app->combineOptions.tools,
+                                  app->combineOptions.keepTools)) {
+          app->status = "Combine subtract removed no target objects";
+        } else {
+          app->status = "Combine subtract complete (object-level)";
+        }
       } else if (!applyAddCombine(app, app->combineOptions.targets,
                                   app->combineOptions.tools,
                                   app->combineOptions.keepTools)) {
@@ -966,9 +1097,11 @@ int main() {
                 app.status = "Added object to extrude target list";
               } else if (app.objectPickMode == ObjectPickMode::CombineTargets) {
                 addUniqueIndex(app.combineOptions.targets, hit);
+                eraseIndex(app.combineOptions.tools, hit);
                 app.status = "Added object to combine target list";
               } else if (app.objectPickMode == ObjectPickMode::CombineTools) {
                 addUniqueIndex(app.combineOptions.tools, hit);
+                eraseIndex(app.combineOptions.targets, hit);
                 app.status = "Added object to combine tool list";
               }
             }
