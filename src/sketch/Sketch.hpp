@@ -6,8 +6,14 @@
 
 #include "ColorVertex.hpp"
 #include "Scene.hpp"
+#include "Units.hpp"
 #include "sketch/Constraint.hpp"
 #include "sketch/Primitive.hpp"
+
+struct SketchDimensionLabel {
+  glm::vec3 worldPos;
+  std::string text;
+};
 
 // A Sketch is an ordered collection of 2D elements (primitives + metadata)
 // that live on a single plane.  It manages constraints, DOF tracking, and
@@ -16,6 +22,7 @@ class Sketch {
  public:
   // --- Element management ---
   void addPrimitive(SketchPrimitive prim);
+  void addCompletedPrimitive(CompletedSketchPrimitive prim);
   void addElement(SketchElement elem);
   void deleteSelected();
   void clear();
@@ -55,11 +62,15 @@ class Sketch {
   // --- Snap ---
   // Find the nearest control point within `threshold`.
   std::optional<glm::vec2> snapToPoint(glm::vec2 pos, float threshold) const;
+  std::vector<std::vector<glm::vec2>> closedProfiles(float tolerance = 0.5f) const;
+  std::vector<glm::vec2> danglingEndpoints(float tolerance = 0.5f) const;
 
   // --- Rendering ---
   void appendLines(std::vector<ColorVertex>& lines, SketchPlane plane) const;
   // Append constraint annotation lines (dimension leaders, icons).
   void appendConstraintAnnotations(std::vector<ColorVertex>& lines, SketchPlane plane) const;
+  void appendConstraintLabels(std::vector<SketchDimensionLabel>& labels, SketchPlane plane,
+                              Unit unit) const;
 
  private:
   void applyOneConstraint(const SketchConstraint& c);

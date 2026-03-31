@@ -39,8 +39,26 @@ struct LengthConstraint {
   float valueMm;
 };
 
+// Rectangle width (max.x - min.x) must equal a specific value.
+struct RectangleWidthConstraint {
+  size_t elem;
+  float valueMm;
+};
+
+// Rectangle height (max.y - min.y) must equal a specific value.
+struct RectangleHeightConstraint {
+  size_t elem;
+  float valueMm;
+};
+
 // Circle or arc must have a specific radius.
 struct RadiusConstraint {
+  size_t elem;
+  float valueMm;
+};
+
+// Circle diameter must equal a specific value.
+struct DiameterConstraint {
   size_t elem;
   float valueMm;
 };
@@ -84,9 +102,11 @@ struct MidpointConstraint {
 
 using SketchConstraint =
     std::variant<CoincidentConstraint, HorizontalConstraint, VerticalConstraint,
-                 FixedConstraint, LengthConstraint, RadiusConstraint,
-                 AngleConstraint, ParallelConstraint, PerpendicularConstraint,
-                 EqualConstraint, TangentConstraint, MidpointConstraint>;
+         FixedConstraint, LengthConstraint, RectangleWidthConstraint,
+         RectangleHeightConstraint, RadiusConstraint,
+         DiameterConstraint, AngleConstraint, ParallelConstraint,
+         PerpendicularConstraint, EqualConstraint, TangentConstraint,
+         MidpointConstraint>;
 
 // Identifies which kind of constraint the user wants to apply.  Shared
 // between the toolbar UI and the constraint-application logic in Sketch.
@@ -115,7 +135,10 @@ inline int constraintDofReduction(const SketchConstraint& c) {
     if constexpr (std::is_same_v<T, VerticalConstraint>)      return 1;
     if constexpr (std::is_same_v<T, FixedConstraint>)         return 2;
     if constexpr (std::is_same_v<T, LengthConstraint>)        return 1;
+    if constexpr (std::is_same_v<T, RectangleWidthConstraint>) return 1;
+    if constexpr (std::is_same_v<T, RectangleHeightConstraint>) return 1;
     if constexpr (std::is_same_v<T, RadiusConstraint>)        return 1;
+    if constexpr (std::is_same_v<T, DiameterConstraint>)      return 1;
     if constexpr (std::is_same_v<T, AngleConstraint>)         return 1;
     if constexpr (std::is_same_v<T, ParallelConstraint>)      return 1;
     if constexpr (std::is_same_v<T, PerpendicularConstraint>) return 1;

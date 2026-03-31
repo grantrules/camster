@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <variant>
 #include <vector>
 
@@ -31,6 +32,23 @@ struct SketchArc {
 };
 
 using SketchPrimitive = std::variant<SketchLine, SketchRect, SketchCircle, SketchArc>;
+
+enum class SketchDimensionKind {
+  Length,
+  RectangleWidth,
+  RectangleHeight,
+  Diameter,
+};
+
+struct SketchDimensionSpec {
+  SketchDimensionKind kind;
+  float valueMm = 0.0f;
+};
+
+struct CompletedSketchPrimitive {
+  SketchPrimitive geometry;
+  std::vector<SketchDimensionSpec> dimensions;
+};
 
 // How well-constrained is an element?
 enum class ConstraintStatus {

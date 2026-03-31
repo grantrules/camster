@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <algorithm>
 #include <cmath>
 #include <vector>
@@ -14,6 +15,17 @@ namespace profile {
 
 constexpr int kSegments = 64;
 constexpr float kPi = 3.14159265358979f;
+
+inline float cross2D(glm::vec2 a, glm::vec2 b) { return a.x * b.y - a.y * b.x; }
+
+inline bool pointInTriangle(glm::vec2 pt, glm::vec2 a, glm::vec2 b, glm::vec2 c) {
+  const float d1 = cross2D(b - a, pt - a);
+  const float d2 = cross2D(c - b, pt - b);
+  const float d3 = cross2D(a - c, pt - c);
+  const bool hasNeg = (d1 < 0) || (d2 < 0) || (d3 < 0);
+  const bool hasPos = (d1 > 0) || (d2 > 0) || (d3 > 0);
+  return !(hasNeg && hasPos);
+}
 
 // Convert a single primitive to an ordered sequence of 2D vertices.
 // Closed shapes return a polyline where first ≈ last.
@@ -54,6 +66,58 @@ inline std::vector<glm::vec2> tessellate2D(const SketchPrimitive& prim) {
 
 inline bool isClosed(const std::vector<glm::vec2>& poly, float tol = 0.5f) {
   return poly.size() >= 3 && glm::length(poly.front() - poly.back()) < tol;
+}
+
+inline std::vector<std::array<size_t, 3>> triangulate2D(const std::vector<glm::vec2>& poly) {
+  std::vector<std::array<size_t, 3>> tris;
+
+  size_t n = poly.size();
+  if (n > 0 && glm::length(poly.front() - poly.back()) < 0.001f) --n;
+  if (n < 3) return tris;
+
+  float area = 0.0f;
+  for (size_t i = 0; i < n; ++i) {
+    const size_t j = (i + 1) % n;
+    area += cross2D(poly[i], poly[j]);
+  }
+
+  std::vector<size_t> idx(n);
+  for (size_t i = 0; i < n; ++i) idx[i] = i;
+  if (area < 0.0f) std::reverse(idx.begin(), idx.end());
+
+  while (idx.size() > 2) {
+    bool earFound = false;
+    const size_t sz = idx.size();
+
+    for (size_t i = 0; i < sz; ++i) {
+      const size_t prev = idx[(i + sz - 1) % sz];
+      const size_t curr = idx[i];
+      const size_t next = idx[(i + 1) % sz];
+
+      if (cross2D(poly[curr] - poly[prev], poly[next] - poly[curr]) <= 0.0f) continue;
+
+      bool inside = false;
+      for (size_t k = 0; k < sz; ++k) {
+        const size_t vi = idx[k];
+        if (vi == prev || vi == curr || vi == next) continue;
+        if (pointInTriangle(poly[vi], poly[prev], poly[curr], poly[next])) {
+          inside = true;
+          break;
+        }
+      }
+
+      if (!inside) {
+        tris.push_back({prev, curr, next});
+        idx.erase(idx.begin() + static_cast<ptrdiff_t>(i));
+        earFound = true;
+        break;
+      }
+    }
+
+    if (!earFound) break;
+  }
+
+  return tris;
 }
 
 // Given polylines from selected primitives, chain them into closed loops.

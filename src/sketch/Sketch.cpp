@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <limits>
+
+#include "sketch/Profile.hpp"
 
 namespace {
 constexpr int kCircleSegments = 64;
@@ -23,6 +26,19 @@ constexpr glm::vec4 kColorConstruction{1.0f, 0.6f, 0.0f, 0.5f};
 constexpr glm::vec4 kColorSelected{1.0f, 0.6f, 0.0f, 1.0f};
 // Constraint annotation lines
 constexpr glm::vec4 kColorAnnotation{0.8f, 0.8f, 0.2f, 0.8f};
+constexpr float kDimensionOffset = 3.0f;
+
+std::string formatDimensionText(float valueMm, Unit unit, const char* prefix = nullptr) {
+  char buffer[64] = {};
+  const float displayValue = fromMm(valueMm, unit);
+  if (prefix && prefix[0] != '\0') {
+    std::snprintf(buffer, sizeof(buffer), "%s%.3f %s", prefix, displayValue,
+                  unitSuffix(unit));
+  } else {
+    std::snprintf(buffer, sizeof(buffer), "%.3f %s", displayValue, unitSuffix(unit));
+  }
+  return std::string(buffer);
+}
 
 glm::vec4 colorForElement(const SketchElement& elem, bool selected) {
   if (selected) return kColorSelected;
@@ -205,12 +221,28 @@ void applyLength(SketchPrimitive& prim, float valueMm) {
   }
 }
 
+void applyRectangleWidth(SketchPrimitive& prim, float valueMm) {
+  if (auto* r = std::get_if<SketchRect>(&prim)) {
+    r->max.x = r->min.x + valueMm;
+  }
+}
+
+void applyRectangleHeight(SketchPrimitive& prim, float valueMm) {
+  if (auto* r = std::get_if<SketchRect>(&prim)) {
+    r->max.y = r->min.y + valueMm;
+  }
+}
+
 void applyRadius(SketchPrimitive& prim, float valueMm) {
   if (auto* c = std::get_if<SketchCircle>(&prim)) {
     c->radius = valueMm;
   } else if (auto* a = std::get_if<SketchArc>(&prim)) {
     a->radius = valueMm;
   }
+}
+
+void applyDiameter(SketchPrimitive& prim, float valueMm) {
+  applyRadius(prim, valueMm * 0.5f);
 }
 
 void applyAngle(SketchPrimitive& prim, float degrees) {
@@ -311,6 +343,27 @@ void Sketch::addPrimitive(SketchPrimitive prim) {
   elements_.push_back(SketchElement{std::move(prim), false, ConstraintStatus::Unconstrained});
   selected_.push_back(false);
   updateConstraintStatus();
+}
+
+void Sketch::addCompletedPrimitive(CompletedSketchPrimitive prim) {
+  const size_t elemIndex = elements_.size();
+  addPrimitive(std::move(prim.geometry));
+  for (const auto& dim : prim.dimensions) {
+    switch (dim.kind) {
+      case SketchDimensionKind::Length:
+        addConstraint(LengthConstraint{elemIndex, dim.valueMm});
+        break;
+      case SketchDimensionKind::RectangleWidth:
+        addConstraint(RectangleWidthConstraint{elemIndex, dim.valueMm});
+        break;
+      case SketchDimensionKind::RectangleHeight:
+        addConstraint(RectangleHeightConstraint{elemIndex, dim.valueMm});
+        break;
+      case SketchDimensionKind::Diameter:
+        addConstraint(DiameterConstraint{elemIndex, dim.valueMm});
+        break;
+    }
+  }
 }
 
 void Sketch::addElement(SketchElement elem) {
@@ -426,9 +479,21 @@ void Sketch::applyOneConstraint(const SketchConstraint& c) {
       if (v.elem < elements_.size())
         applyLength(elements_[v.elem].geometry, v.valueMm);
 
+    } else if constexpr (std::is_same_v<T, RectangleWidthConstraint>) {
+      if (v.elem < elements_.size())
+        applyRectangleWidth(elements_[v.elem].geometry, v.valueMm);
+
+    } else if constexpr (std::is_same_v<T, RectangleHeightConstraint>) {
+      if (v.elem < elements_.size())
+        applyRectangleHeight(elements_[v.elem].geometry, v.valueMm);
+
     } else if constexpr (std::is_same_v<T, RadiusConstraint>) {
       if (v.elem < elements_.size())
         applyRadius(elements_[v.elem].geometry, v.valueMm);
+
+    } else if constexpr (std::is_same_v<T, DiameterConstraint>) {
+      if (v.elem < elements_.size())
+        applyDiameter(elements_[v.elem].geometry, v.valueMm);
 
     } else if constexpr (std::is_same_v<T, AngleConstraint>) {
       if (v.elem < elements_.size())
@@ -656,6 +721,62 @@ std::optional<glm::vec2> Sketch::snapToPoint(glm::vec2 pos, float threshold) con
   return bestPt;
 }
 
+std::vector<std::vector<glm::vec2>> Sketch::closedProfiles(float tolerance) const {
+  std::vector<std::vector<glm::vec2>> polylines;
+  polylines.reserve(elements_.size());
+  for (const auto& elem : elements_) {
+    if (elem.construction) continue;
+    polylines.push_back(profile::tessellate2D(elem.geometry));
+  }
+  return profile::chainProfiles(polylines, tolerance);
+}
+
+std::vector<glm::vec2> Sketch::danglingEndpoints(float tolerance) const {
+  std::vector<glm::vec2> points;
+
+  for (size_t i = 0; i < elements_.size(); ++i) {
+    if (elements_[i].construction) continue;
+
+    std::vector<glm::vec2> candidates;
+    std::visit([&](const auto& p) {
+      using T = std::decay_t<decltype(p)>;
+      if constexpr (std::is_same_v<T, SketchLine>) {
+        candidates.push_back(p.start);
+        candidates.push_back(p.end);
+      } else if constexpr (std::is_same_v<T, SketchArc>) {
+        candidates.push_back(
+            p.center + p.radius * glm::vec2(std::cos(p.startAngle), std::sin(p.startAngle)));
+        candidates.push_back(p.center + p.radius *
+                                          glm::vec2(std::cos(p.startAngle + p.sweepAngle),
+                                                    std::sin(p.startAngle + p.sweepAngle)));
+      }
+    }, elements_[i].geometry);
+
+    for (const glm::vec2& candidate : candidates) {
+      bool connected = false;
+      for (size_t j = 0; j < elements_.size(); ++j) {
+        if (i == j || elements_[j].construction) continue;
+        if (distanceToPrimitive(candidate, elements_[j].geometry) <= tolerance) {
+          connected = true;
+          break;
+        }
+      }
+      if (!connected) {
+        bool duplicate = false;
+        for (const glm::vec2& existing : points) {
+          if (glm::length(existing - candidate) <= tolerance) {
+            duplicate = true;
+            break;
+          }
+        }
+        if (!duplicate) points.push_back(candidate);
+      }
+    }
+  }
+
+  return points;
+}
+
 // --- Rendering ---
 
 void Sketch::appendLines(std::vector<ColorVertex>& lines, SketchPlane plane) const {
@@ -681,13 +802,32 @@ void Sketch::appendConstraintAnnotations(std::vector<ColorVertex>& lines,
         float len = glm::length(dir);
         if (len < 1e-6f) return;
         glm::vec2 perp(-dir.y / len, dir.x / len);
-        float offset = 3.0f;
-        glm::vec2 a = l->start + perp * offset;
-        glm::vec2 b = l->end + perp * offset;
+        glm::vec2 a = l->start + perp * kDimensionOffset;
+        glm::vec2 b = l->end + perp * kDimensionOffset;
         appendLine2D(lines, a, b, plane, kColorAnnotation);
         // Leader lines.
         appendLine2D(lines, l->start, a, plane, kColorAnnotation);
         appendLine2D(lines, l->end, b, plane, kColorAnnotation);
+
+      } else if constexpr (std::is_same_v<T, RectangleWidthConstraint>) {
+        if (v.elem >= elements_.size()) return;
+        auto* r = std::get_if<SketchRect>(&elements_[v.elem].geometry);
+        if (!r) return;
+        glm::vec2 a = r->min + glm::vec2(0.0f, -kDimensionOffset);
+        glm::vec2 b = glm::vec2(r->max.x, r->min.y - kDimensionOffset);
+        appendLine2D(lines, a, b, plane, kColorAnnotation);
+        appendLine2D(lines, r->min, a, plane, kColorAnnotation);
+        appendLine2D(lines, glm::vec2(r->max.x, r->min.y), b, plane, kColorAnnotation);
+
+      } else if constexpr (std::is_same_v<T, RectangleHeightConstraint>) {
+        if (v.elem >= elements_.size()) return;
+        auto* r = std::get_if<SketchRect>(&elements_[v.elem].geometry);
+        if (!r) return;
+        glm::vec2 a(r->max.x + kDimensionOffset, r->min.y);
+        glm::vec2 b = r->max + glm::vec2(kDimensionOffset, 0.0f);
+        appendLine2D(lines, a, b, plane, kColorAnnotation);
+        appendLine2D(lines, glm::vec2(r->max.x, r->min.y), a, plane, kColorAnnotation);
+        appendLine2D(lines, r->max, b, plane, kColorAnnotation);
 
       } else if constexpr (std::is_same_v<T, RadiusConstraint>) {
         if (v.elem >= elements_.size()) return;
@@ -705,8 +845,74 @@ void Sketch::appendConstraintAnnotations(std::vector<ColorVertex>& lines,
         // Radius leader from center to edge.
         glm::vec2 edge = center + glm::vec2(radius, 0.0f);
         appendLine2D(lines, center, edge, plane, kColorAnnotation);
+
+      } else if constexpr (std::is_same_v<T, DiameterConstraint>) {
+        if (v.elem >= elements_.size()) return;
+        auto* ci = std::get_if<SketchCircle>(&elements_[v.elem].geometry);
+        if (!ci) return;
+        glm::vec2 left = ci->center + glm::vec2(-ci->radius, 0.0f);
+        glm::vec2 right = ci->center + glm::vec2(ci->radius, 0.0f);
+        appendLine2D(lines, left, right, plane, kColorAnnotation);
       }
       // Other constraint types: no annotation lines for now.
+    }, c);
+  }
+}
+
+void Sketch::appendConstraintLabels(std::vector<SketchDimensionLabel>& labels, SketchPlane plane,
+                                    Unit unit) const {
+  for (const auto& c : constraints_) {
+    std::visit([&](const auto& v) {
+      using T = std::decay_t<decltype(v)>;
+
+      if constexpr (std::is_same_v<T, LengthConstraint>) {
+        if (v.elem >= elements_.size()) return;
+        auto* l = std::get_if<SketchLine>(&elements_[v.elem].geometry);
+        if (!l) return;
+        glm::vec2 dir = l->end - l->start;
+        float len = glm::length(dir);
+        if (len < 1e-6f) return;
+        glm::vec2 perp(-dir.y / len, dir.x / len);
+        glm::vec2 mid = (l->start + l->end) * 0.5f + perp * (kDimensionOffset + 0.75f);
+        labels.push_back({toWorld(mid, plane), formatDimensionText(v.valueMm, unit)});
+
+      } else if constexpr (std::is_same_v<T, RectangleWidthConstraint>) {
+        if (v.elem >= elements_.size()) return;
+        auto* r = std::get_if<SketchRect>(&elements_[v.elem].geometry);
+        if (!r) return;
+        glm::vec2 mid((r->min.x + r->max.x) * 0.5f, r->min.y - (kDimensionOffset + 0.75f));
+        labels.push_back({toWorld(mid, plane), formatDimensionText(v.valueMm, unit)});
+
+      } else if constexpr (std::is_same_v<T, RectangleHeightConstraint>) {
+        if (v.elem >= elements_.size()) return;
+        auto* r = std::get_if<SketchRect>(&elements_[v.elem].geometry);
+        if (!r) return;
+        glm::vec2 mid(r->max.x + (kDimensionOffset + 0.75f), (r->min.y + r->max.y) * 0.5f);
+        labels.push_back({toWorld(mid, plane), formatDimensionText(v.valueMm, unit)});
+
+      } else if constexpr (std::is_same_v<T, RadiusConstraint>) {
+        if (v.elem >= elements_.size()) return;
+        glm::vec2 center;
+        float radius = 0.0f;
+        if (auto* ci = std::get_if<SketchCircle>(&elements_[v.elem].geometry)) {
+          center = ci->center;
+          radius = ci->radius;
+        } else if (auto* ar = std::get_if<SketchArc>(&elements_[v.elem].geometry)) {
+          center = ar->center;
+          radius = ar->radius;
+        } else {
+          return;
+        }
+        glm::vec2 pos = center + glm::vec2(radius * 0.5f, 0.75f);
+        labels.push_back({toWorld(pos, plane), formatDimensionText(v.valueMm, unit, "R ")});
+
+      } else if constexpr (std::is_same_v<T, DiameterConstraint>) {
+        if (v.elem >= elements_.size()) return;
+        auto* ci = std::get_if<SketchCircle>(&elements_[v.elem].geometry);
+        if (!ci) return;
+        glm::vec2 pos = ci->center + glm::vec2(0.0f, 0.75f);
+        labels.push_back({toWorld(pos, plane), formatDimensionText(v.valueMm, unit, "D ")});
+      }
     }, c);
   }
 }

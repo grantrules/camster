@@ -24,7 +24,8 @@ class Toolbar {
  private:
   enum class Tab { Sketch, Constrain, Dimension };
   Tab activeTab_ = Tab::Sketch;
-  char dimBuffer_[128] = {};
+  char dimBufferA_[128] = {};
+  char dimBufferB_[128] = {};
   char extrudeBuffer_[128] = {};
   char constraintValueBuffer_[128] = {};
 };

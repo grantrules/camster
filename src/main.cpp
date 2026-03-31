@@ -92,6 +92,19 @@ void rebuildCombinedMesh(AppState* app) {
   app->renderer.setMesh(app->mesh);
 }
 
+std::optional<ImVec2> projectToScreen(glm::vec3 world, const glm::mat4& view,
+                                      const glm::mat4& projection,
+                                      const ImVec2& viewportSize) {
+  const glm::vec4 clip = projection * view * glm::vec4(world, 1.0f);
+  if (clip.w <= 1e-6f) return std::nullopt;
+
+  const glm::vec3 ndc = glm::vec3(clip) / clip.w;
+  if (ndc.z < 0.0f || ndc.z > 1.0f) return std::nullopt;
+
+  return ImVec2((ndc.x * 0.5f + 0.5f) * viewportSize.x,
+                (ndc.y * 0.5f + 0.5f) * viewportSize.y);
+}
+
 // Möller–Trumbore ray-triangle intersection.  Returns distance or -1.
 float rayTriangle(glm::vec3 origin, glm::vec3 dir, glm::vec3 v0, glm::vec3 v1, glm::vec3 v2) {
   const glm::vec3 e1 = v1 - v0;
@@ -715,20 +728,27 @@ int main() {
 
     // Consume completed sketch primitives.
     if (auto prim = app.sketchTool.takeResult()) {
-      app.activeSketch().addPrimitive(std::move(*prim));
+      app.activeSketch().addCompletedPrimitive(std::move(*prim));
     }
 
     // --- Build line data every frame ---
     std::vector<ColorVertex> allLines;
+    std::vector<SketchDimensionLabel> dimensionLabels;
+    std::vector<std::vector<glm::vec2>> filledProfiles;
+    std::vector<glm::vec2> danglingPoints;
     app.gizmo.appendLines(allLines);
 
     if (app.sceneMode == SceneMode::Sketch) {
       appendGrid(allLines, app.activePlane, app.project.gridExtent, app.project.gridSpacing);
       app.activeSketch().appendLines(allLines, app.activePlane);
       app.activeSketch().appendConstraintAnnotations(allLines, app.activePlane);
+      app.activeSketch().appendConstraintLabels(dimensionLabels, app.activePlane,
+                                               app.project.defaultUnit);
+      filledProfiles = app.activeSketch().closedProfiles();
+      danglingPoints = app.activeSketch().danglingEndpoints();
       app.sketchTool.appendPreview(allLines, app.activePlane);
 
-      // Snap indicator: show a small diamond at the snap point when drawing.
+      // Snap indicator: show a small preview cross at the snap point when drawing.
       if (app.sketchTool.activeTool() != Tool::None) {
         double mx = 0.0, my = 0.0;
         glfwGetCursorPos(window, &mx, &my);
@@ -744,16 +764,12 @@ int main() {
           auto snap = app.activeSketch().snapToPoint(pp, kSnapThreshold);
           if (snap) {
             const float sz = kSnapIndicatorSize;
-            const glm::vec4 snapColor{0.0f, 1.0f, 0.0f, 1.0f};
+            const glm::vec4 snapColor{0.0f, 1.0f, 1.0f, 1.0f};
             glm::vec2 s = *snap;
-            allLines.push_back({toWorld(s + glm::vec2(0, sz), app.activePlane), snapColor});
-            allLines.push_back({toWorld(s + glm::vec2(sz, 0), app.activePlane), snapColor});
-            allLines.push_back({toWorld(s + glm::vec2(sz, 0), app.activePlane), snapColor});
-            allLines.push_back({toWorld(s + glm::vec2(0, -sz), app.activePlane), snapColor});
-            allLines.push_back({toWorld(s + glm::vec2(0, -sz), app.activePlane), snapColor});
-            allLines.push_back({toWorld(s + glm::vec2(-sz, 0), app.activePlane), snapColor});
-            allLines.push_back({toWorld(s + glm::vec2(-sz, 0), app.activePlane), snapColor});
-            allLines.push_back({toWorld(s + glm::vec2(0, sz), app.activePlane), snapColor});
+            allLines.push_back({toWorld(s + glm::vec2(-sz, 0.0f), app.activePlane), snapColor});
+            allLines.push_back({toWorld(s + glm::vec2(sz, 0.0f), app.activePlane), snapColor});
+            allLines.push_back({toWorld(s + glm::vec2(0.0f, -sz), app.activePlane), snapColor});
+            allLines.push_back({toWorld(s + glm::vec2(0.0f, sz), app.activePlane), snapColor});
           }
         }
       }
@@ -843,6 +859,39 @@ int main() {
       ImVec2 p2(app.dragCurScreen.x, app.dragCurScreen.y);
       dl->AddRectFilled(p1, p2, IM_COL32(0, 120, 255, 40));
       dl->AddRect(p1, p2, IM_COL32(0, 120, 255, 200), 0.0f, 0, 1.5f);
+    }
+
+    if (app.sceneMode == SceneMode::Sketch) {
+      ImDrawList* dl = ImGui::GetForegroundDrawList();
+      const ImVec2 viewportSize = ImGui::GetIO().DisplaySize;
+      const glm::mat4 view = app.camera.viewMatrix();
+      const glm::mat4 proj = app.camera.projectionMatrix(app.renderer.framebufferAspect());
+
+      for (const auto& profile : filledProfiles) {
+        const auto tris = profile::triangulate2D(profile);
+        for (const auto& tri : tris) {
+          auto a = projectToScreen(toWorld(profile[tri[0]], app.activePlane), view, proj,
+                                   viewportSize);
+          auto b = projectToScreen(toWorld(profile[tri[1]], app.activePlane), view, proj,
+                                   viewportSize);
+          auto c = projectToScreen(toWorld(profile[tri[2]], app.activePlane), view, proj,
+                                   viewportSize);
+          if (!a || !b || !c) continue;
+          dl->AddTriangleFilled(*a, *b, *c, IM_COL32(90, 170, 255, 28));
+        }
+      }
+
+      for (const glm::vec2& pt : danglingPoints) {
+        auto screenPos = projectToScreen(toWorld(pt, app.activePlane), view, proj, viewportSize);
+        if (!screenPos) continue;
+        dl->AddCircleFilled(*screenPos, 4.0f, IM_COL32(230, 60, 60, 255), 16);
+      }
+
+      for (const auto& label : dimensionLabels) {
+        auto screenPos = projectToScreen(label.worldPos, view, proj, viewportSize);
+        if (!screenPos) continue;
+        dl->AddText(*screenPos, IM_COL32(235, 235, 170, 255), label.text.c_str());
+      }
     }
 
     ImGui::Render();

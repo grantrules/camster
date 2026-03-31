@@ -6,6 +6,13 @@
 #include <imgui.h>
 
 namespace {
+std::optional<float> parseToolbarDimension(const char* buffer, Unit defaultUnit) {
+  if (!buffer || buffer[0] == '\0') return std::nullopt;
+  auto parsed = parseDimension(std::string(buffer), defaultUnit);
+  if (!parsed) return std::nullopt;
+  return parsed->valueMm;
+}
+
 bool toolButton(const char* label, bool active) {
   if (active) {
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.6f, 1.0f, 1.0f));
@@ -137,27 +144,47 @@ ToolbarAction Toolbar::draw(SketchTool& tool, ExtrudeTool& extrude, bool hasSele
       }
       if (!hasSelection) ImGui::EndDisabled();
 
-      // Dimension input (visible when the drawing tool can accept a typed value).
-      if (tool.wantsDimension()) {
+      // Dimension input for the in-progress sketch tool.
+      const int dimCount = tool.dimensionInputCount();
+      if (dimCount > 0) {
+        tool.setDimensionValue(0, parseToolbarDimension(dimBufferA_, defaultUnit));
+        tool.setDimensionValue(1, parseToolbarDimension(dimBufferB_, defaultUnit));
+
         ImGui::SameLine();
         ImGui::Separator();
         ImGui::SameLine();
-        ImGui::Text("%s:", tool.dimensionPrompt());
-        ImGui::SameLine();
 
-        ImGui::PushItemWidth(120);
-        if (ImGui::InputText("##dim", dimBuffer_, sizeof(dimBuffer_),
-                             ImGuiInputTextFlags_EnterReturnsTrue)) {
-          auto parsed = parseDimension(std::string(dimBuffer_), defaultUnit);
-          if (parsed) {
-            tool.applyDimension(parsed->valueMm);
-            dimBuffer_[0] = '\0';
+        bool finishRequested = false;
+        for (int i = 0; i < dimCount; ++i) {
+          char* buffer = (i == 0) ? dimBufferA_ : dimBufferB_;
+          const char* inputId = (i == 0) ? "##dimA" : "##dimB";
+
+          ImGui::Text("%s:", tool.dimensionPrompt(i));
+          ImGui::SameLine();
+          ImGui::PushItemWidth(120);
+          if (ImGui::InputText(inputId, buffer, 128, ImGuiInputTextFlags_EnterReturnsTrue)) {
+            finishRequested = true;
+          }
+          ImGui::PopItemWidth();
+
+          if (i + 1 < dimCount) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("(%s)", unitSuffix(defaultUnit));
+            ImGui::SameLine();
+            ImGui::Separator();
+            ImGui::SameLine();
           }
         }
-        ImGui::PopItemWidth();
 
         ImGui::SameLine();
         ImGui::TextDisabled("(%s)", unitSuffix(defaultUnit));
+
+        tool.setDimensionValue(0, parseToolbarDimension(dimBufferA_, defaultUnit));
+        tool.setDimensionValue(1, parseToolbarDimension(dimBufferB_, defaultUnit));
+        if (finishRequested && tool.finishFromDimensions()) {
+          dimBufferA_[0] = '\0';
+          dimBufferB_[0] = '\0';
+        }
       }
 
     } else if (activeTab_ == Tab::Constrain) {
