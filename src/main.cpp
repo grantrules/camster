@@ -1045,8 +1045,13 @@ void drawObjectBrowserWindow(AppState* app) {
           }
           if (ImGui::Selectable(label.c_str(), selected,
                                 ImGuiSelectableFlags_SpanAllColumns)) {
-            setSingleOrMultiSelection(app->browserSelectedObjects, i, multiSelect);
-            app->objectSelectionAnchor = i;
+            const bool shiftClick = ImGui::GetIO().KeyShift;
+            if (shiftClick && app->objectSelectionAnchor >= 0) {
+              setSelectionRange(app->browserSelectedObjects, app->objectSelectionAnchor, i);
+            } else {
+              setSingleOrMultiSelection(app->browserSelectedObjects, i, multiSelect);
+              app->objectSelectionAnchor = i;
+            }
             syncSelectedObjectFromBrowser(app);
             app->renameObjectIndex = -1;
             app->browserFocusSection = BrowserSection::Objects;
@@ -1127,8 +1132,13 @@ void drawObjectBrowserWindow(AppState* app) {
           }
           if (ImGui::Selectable(label.c_str(), selected,
                                 ImGuiSelectableFlags_SpanAllColumns)) {
-            setSingleOrMultiSelection(app->browserSelectedSketches, i, multiSelect);
-            app->sketchSelectionAnchor = i;
+            const bool shiftClick = ImGui::GetIO().KeyShift;
+            if (shiftClick && app->sketchSelectionAnchor >= 0) {
+              setSelectionRange(app->browserSelectedSketches, app->sketchSelectionAnchor, i);
+            } else {
+              setSingleOrMultiSelection(app->browserSelectedSketches, i, multiSelect);
+              app->sketchSelectionAnchor = i;
+            }
             syncSelectedSketchFromBrowser(app);
             app->renameSketchIndex = -1;
             app->browserFocusSection = BrowserSection::Sketches;
@@ -1288,7 +1298,7 @@ void drawObjectBrowserWindow(AppState* app) {
   }
 
   ImGui::Separator();
-  ImGui::TextDisabled("Ctrl+click: multi-select  |  F2: rename  |  Del: delete  |  Arrows: move");
+  ImGui::TextDisabled("Ctrl+click: multi-select  |  Shift+click: range  |  F2: rename  |  Del: delete  |  Arrows: move");
   ImGui::End();
 }
 
