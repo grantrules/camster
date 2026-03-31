@@ -1,5 +1,6 @@
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <future>
 #include <iostream>
@@ -905,12 +906,17 @@ int main() {
           const auto tmpPath =
               (std::filesystem::temp_directory_path() / "camster_print.stl").string();
           std::string err;
-          if (!exportMesh.saveAsBinary(tmpPath, err)) {
+          const bool exported = exportMesh.saveAsBinary(tmpPath, err);
+          if (!exported) {
             app.status = "3D Print: export failed: " + err;
-          } else if (!launchSlicer(app.printWindow.currentSlicer(), tmpPath)) {
-            app.status = "3D Print: failed to launch slicer";
           } else {
-            app.status = "Opened in slicer: " + app.printWindow.currentSlicer();
+            app.printSettings.addRecent(app.printWindow.currentSlicer());
+            app.printSettings.save();
+            if (!launchSlicer(app.printWindow.currentSlicer(), tmpPath)) {
+              app.status = "3D Print: failed to launch slicer";
+            } else {
+              app.status = "Opened in slicer: " + app.printWindow.currentSlicer();
+            }
           }
         }
       }
