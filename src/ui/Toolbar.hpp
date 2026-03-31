@@ -6,6 +6,7 @@
 #include "sketch/SketchTool.hpp"
 
 struct ToolbarAction {
+  bool exitSketchRequested = false;
   bool extrudeRequested = false;
   bool extrudeConfirmed = false;
   bool deleteRequested = false;
@@ -22,7 +23,7 @@ class Toolbar {
   const char* constraintValue() const { return constraintValueBuffer_; }
 
  private:
-  enum class Tab { Sketch, Constrain, Dimension };
+  enum class Tab { Sketch, Solid, Constrain, Dimension };
   Tab activeTab_ = Tab::Sketch;
   char dimBufferA_[128] = {};
   char dimBufferB_[128] = {};

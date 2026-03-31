@@ -87,8 +87,17 @@ ToolbarAction Toolbar::draw(SketchTool& tool, ExtrudeTool& extrude, bool hasSele
       action.extrudeConfirmed = true;
     }
   } else {
+    if (ImGui::Button("Exit Sketch")) {
+      action.exitSketchRequested = true;
+    }
+    ImGui::SameLine();
+    ImGui::Text("|");
+    ImGui::SameLine();
+
     // --- Tab bar ---
     if (tabButton("Sketch", activeTab_ == Tab::Sketch)) activeTab_ = Tab::Sketch;
+    ImGui::SameLine();
+    if (tabButton("Solid", activeTab_ == Tab::Solid)) activeTab_ = Tab::Solid;
     ImGui::SameLine();
     if (tabButton("Constrain", activeTab_ == Tab::Constrain)) activeTab_ = Tab::Constrain;
     ImGui::SameLine();
@@ -136,14 +145,6 @@ ToolbarAction Toolbar::draw(SketchTool& tool, ExtrudeTool& extrude, bool hasSele
       ImGui::Text("|");
       ImGui::SameLine();
 
-      // Extrude button.
-      if (!hasSelection) ImGui::BeginDisabled();
-      if (ImGui::Button("Extrude")) {
-        tool.setTool(Tool::None);
-        action.extrudeRequested = true;
-      }
-      if (!hasSelection) ImGui::EndDisabled();
-
       // Dimension input for the in-progress sketch tool.
       const int dimCount = tool.dimensionInputCount();
       if (dimCount > 0) {
@@ -186,6 +187,16 @@ ToolbarAction Toolbar::draw(SketchTool& tool, ExtrudeTool& extrude, bool hasSele
           dimBufferB_[0] = '\0';
         }
       }
+
+    } else if (activeTab_ == Tab::Solid) {
+      if (!hasSelection) ImGui::BeginDisabled();
+      if (ImGui::Button("Extrude")) {
+        tool.setTool(Tool::None);
+        action.extrudeRequested = true;
+      }
+      if (!hasSelection) ImGui::EndDisabled();
+      ImGui::SameLine();
+      ImGui::TextDisabled("Use selected closed profiles to create or modify solids");
 
     } else if (activeTab_ == Tab::Constrain) {
       // --- Constraint tools (require selection) ---

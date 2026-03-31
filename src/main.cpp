@@ -162,6 +162,12 @@ int main() {
                            app.activeSketch().hasSelection(), app.project.defaultUnit);
     }
 
+    if (toolbarAction.exitSketchRequested &&
+        app.sceneMode == SceneMode::Sketch && app.hasActiveSketch()) {
+      exitSketchMode(&app);
+      app.status = "Exited sketch mode";
+    }
+
     // Handle "Extrude" button press: gather profiles from selection.
     if (toolbarAction.extrudeRequested && !app.extrudeTool.active() && app.hasActiveSketch()) {
       if (!app.activeSketchVisible()) {
@@ -650,19 +656,24 @@ int main() {
       app.gizmo.appendHighlightedPlane(allLines, *app.hoveredPlaneIndicator);
     }
 
+    const int maxVisibleSketchIndex =
+        (app.sceneMode == SceneMode::Sketch && app.hasActiveSketch())
+            ? app.activeSketchIndex
+            : static_cast<int>(app.sketches.size()) - 1;
+    for (int i = 0; i <= maxVisibleSketchIndex; ++i) {
+      const auto& entry = app.sketches[i];
+      if (!entry.meta.visible) continue;
+      std::vector<ColorVertex> sketchLines;
+      entry.sketch.appendLines(sketchLines, entry.plane);
+      entry.sketch.appendConstraintAnnotations(sketchLines, entry.plane);
+      for (auto& line : sketchLines) {
+        line.position += planeNormal(entry.plane) * entry.offsetMm;
+        allLines.push_back(line);
+      }
+    }
+
     if (app.sceneMode == SceneMode::Sketch && app.hasActiveSketch() && app.activeSketchVisible()) {
       appendGrid(allLines, app.activePlane(), app.project.gridExtent, app.project.gridSpacing);
-      for (int i = 0; i <= app.activeSketchIndex; ++i) {
-        const auto& entry = app.sketches[i];
-        if (!entry.meta.visible) continue;
-        std::vector<ColorVertex> sketchLines;
-        entry.sketch.appendLines(sketchLines, entry.plane);
-        entry.sketch.appendConstraintAnnotations(sketchLines, entry.plane);
-        for (auto& line : sketchLines) {
-          line.position += planeNormal(entry.plane) * entry.offsetMm;
-          allLines.push_back(line);
-        }
-      }
       app.activeSketch().appendConstraintLabels(dimensionLabels, app.activePlane(),
                                                 app.project.defaultUnit);
       for (auto& label : dimensionLabels) {
@@ -741,6 +752,7 @@ int main() {
 
     drawPanel(&app);
     drawObjectBrowserWindow(&app);
+    drawTimelineWindow(&app);
     drawNewSketchWindow(&app);
     drawProjectToolWindow(&app);
     drawAppSettingsWindow(&app);

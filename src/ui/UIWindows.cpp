@@ -4,6 +4,7 @@
 #include <cmath>
 #include <string>
 #include <type_traits>
+#include <variant>
 #include <vector>
 
 #include <imgui.h>
@@ -139,6 +140,19 @@ bool unitCombo(const char* label, Unit* unit) {
     }
   }
   return changed;
+}
+
+int findCreateEntryIndexForSketch(const Timeline& timeline, int sketchIndex) {
+  if (sketchIndex < 0) return -1;
+  int createCount = 0;
+  const auto& entries = timeline.entries();
+  for (int i = 0; i < static_cast<int>(entries.size()); ++i) {
+    if (std::get_if<CreateSketchAction>(&entries[i].action) != nullptr) {
+      if (createCount == sketchIndex) return i;
+      ++createCount;
+    }
+  }
+  return -1;
 }
 }  // namespace
 
@@ -671,7 +685,15 @@ void drawObjectBrowserWindow(AppState* app) {
             app->browserSelectedSketches.assign(1, i);
             app->sketchSelectionAnchor = i;
             syncSelectedSketchFromBrowser(app);
-            beginSketchRename(app, i);
+            const int createEntryIndex = findCreateEntryIndexForSketch(app->timeline, i);
+            if (createEntryIndex >= 0) {
+              app->timelineCursor = createEntryIndex;
+            }
+            app->sceneMode = SceneMode::Sketch;
+            if (app->hasActiveSketch()) {
+              snapCameraToPlane(app, app->activePlane());
+            }
+            app->status = "Jumped to sketch creation point in timeline";
             app->browserFocusSection = BrowserSection::Sketches;
           }
         }
@@ -838,6 +860,48 @@ void drawObjectBrowserWindow(AppState* app) {
   ImGui::End();
 }
 
+void drawTimelineWindow(AppState* app) {
+  ImGui::SetNextWindowPos(ImVec2(350.0f, 320.0f), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSize(ImVec2(420.0f, 260.0f), ImGuiCond_FirstUseEver);
+  if (!ImGui::Begin("History Timeline")) {
+    ImGui::End();
+    return;
+  }
+
+  const auto& entries = app->timeline.entries();
+  if (entries.empty()) {
+    ImGui::TextDisabled("(timeline is empty)");
+    app->timelineCursor = -1;
+    ImGui::End();
+    return;
+  }
+
+  if (app->timelineCursor < 0 || app->timelineCursor >= static_cast<int>(entries.size())) {
+    app->timelineCursor = static_cast<int>(entries.size()) - 1;
+  }
+
+  ImGui::Text("Current timeline position: %d / %d", app->timelineCursor + 1,
+              static_cast<int>(entries.size()));
+  ImGui::Separator();
+  ImGui::BeginChild("##timelineEntries", ImVec2(0.0f, 0.0f), true);
+
+  for (int i = 0; i < static_cast<int>(entries.size()); ++i) {
+    const auto& e = entries[i];
+    const bool isCurrent = i == app->timelineCursor;
+    std::string row = (isCurrent ? "-> " : "   ") + std::to_string(i + 1) + ". " + e.displayName;
+    if (e.hasConflict) {
+      row += " [conflict]";
+    }
+    if (ImGui::Selectable(row.c_str(), isCurrent)) {
+      app->timelineCursor = i;
+      app->status = "Timeline position set to step " + std::to_string(i + 1);
+    }
+  }
+
+  ImGui::EndChild();
+  ImGui::End();
+}
+
 void drawExtrudeOptionsWindow(AppState* app) {
   if (!app->extrudeOptions.visible) return;
   if (app->sceneMode != SceneMode::Sketch || !app->hasActiveSketch()) {
@@ -932,6 +996,7 @@ void drawExtrudeOptionsWindow(AppState* app) {
                      std::string(createNewObject
                              ? "Extrude New Object"
                              : (subtract ? "Subtract Extrude" : "Add Extrude")));
+            app->timelineCursor = app->timeline.size() - 1;
         };
 
         if (subtract) {
@@ -1004,6 +1069,7 @@ void drawCombineWindow(AppState* app) {
             app, static_cast<int>(app->sceneObjects.size()) - 1);
         app->timeline.push(std::move(ca),
                            std::string(subtract ? "Subtract Combine" : "Add Combine"));
+        app->timelineCursor = app->timeline.size() - 1;
       };
 
       if (subtract) {

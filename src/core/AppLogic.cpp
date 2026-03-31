@@ -205,6 +205,7 @@ void createSketch(AppState* app, SketchPlane plane, float offsetMm) {
   action.offsetMm = offsetMm;
   action.name = std::string(entry.meta.name.data());
   app->timeline.push(std::move(action), "Create " + std::string(entry.meta.name.data()));
+  app->timelineCursor = app->timeline.size() - 1;
 
   app->sketches.push_back(std::move(entry));
   app->activeSketchIndex = static_cast<int>(app->sketches.size()) - 1;
@@ -630,7 +631,8 @@ void exitSketchMode(AppState* app) {
     action.elements = sketch.elements();
     action.constraints = sketch.constraints();
     app->timeline.push(std::move(action),
-                       "Edit " + std::string(entry.meta.name.data()));
+               "Edit " + std::string(entry.meta.name.data()));
+    app->timelineCursor = app->timeline.size() - 1;
     app->activeSketch().clearSelection();
   }
   app->sceneMode = SceneMode::View3D;

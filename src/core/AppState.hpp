@@ -108,6 +108,7 @@ struct AppState {
   AppSettings appSettings;
   Project project;
   Timeline timeline;
+  int timelineCursor = -1;  // index into timeline entries; -1 means no selection yet
   bool showAppSettings = false;
   bool showProjectSettings = false;
 
