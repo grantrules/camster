@@ -208,6 +208,15 @@ struct AppState {
   bool loadingMesh = false;
 };
 
+void syncSelectedObjectFromBrowser(AppState* app) {
+  sanitizeObjectIndices(app->browserSelectedObjects, static_cast<int>(app->sceneObjects.size()));
+  if (app->browserSelectedObjects.empty()) {
+    app->selectedObject = -1;
+  } else {
+    app->selectedObject = app->browserSelectedObjects.front();
+  }
+}
+
 void initializeSketchMetadata(AppState* app) {
   setName(app->sketchMeta[0].name, "Sketch 1");
   setName(app->sketchMeta[1].name, "Sketch 2");
@@ -264,9 +273,7 @@ bool launchSlicer(const std::string& slicerPath, const std::string& stlPath) {
 
 void rebuildCombinedMesh(AppState* app) {
   sanitizeObjectIndices(app->browserSelectedObjects, static_cast<int>(app->sceneObjects.size()));
-  if (app->selectedObject >= static_cast<int>(app->sceneObjects.size())) {
-    app->selectedObject = app->sceneObjects.empty() ? -1 : 0;
-  }
+  syncSelectedObjectFromBrowser(app);
   app->mesh = StlMesh();
   for (int i = 0; i < static_cast<int>(app->sceneObjects.size()); ++i) {
     if (i < static_cast<int>(app->sceneObjectMeta.size()) &&
@@ -500,7 +507,10 @@ void drawObjectSelectionList(const char* title, std::vector<int>& indices,
     ImGui::PushID((std::string(title) + std::to_string(i)).c_str());
     if (ImGui::SmallButton("x")) eraseAt = i;
     ImGui::SameLine();
-    ImGui::Text("Object %d", indices[i] + 1);
+    const int objectIndex = indices[i];
+    const auto& meta = app->sceneObjectMeta[objectIndex];
+    ImGui::Text("%s%s%s", meta.name.data(), meta.visible ? "" : " [hidden]",
+                meta.locked ? " [locked]" : "");
     ImGui::PopID();
   }
   if (eraseAt >= 0) indices.erase(indices.begin() + eraseAt);
@@ -818,6 +828,7 @@ void drawObjectBrowserWindow(AppState* app) {
   const bool multiSelect = ImGui::GetIO().KeyCtrl;
 
   if (ImGui::CollapsingHeader("Objects", ImGuiTreeNodeFlags_DefaultOpen)) {
+    ImGui::TextDisabled("V  L  Name");
     for (int i = 0; i < static_cast<int>(app->sceneObjects.size()); ++i) {
       auto& meta = app->sceneObjectMeta[i];
       ImGui::PushID(i);
@@ -832,13 +843,15 @@ void drawObjectBrowserWindow(AppState* app) {
       const bool selected = hasIndex(app->browserSelectedObjects, i);
       if (ImGui::Selectable("##objsel", selected, 0, ImVec2(18.0f, 0.0f))) {
         setSingleOrMultiSelection(app->browserSelectedObjects, i, multiSelect);
-        if (app->browserSelectedObjects.size() == 1) {
-          app->selectedObject = app->browserSelectedObjects[0];
-        }
+        syncSelectedObjectFromBrowser(app);
       }
       ImGui::SameLine();
       ImGui::SetNextItemWidth(-1.0f);
       ImGui::InputText("##objname", meta.name.data(), meta.name.size());
+      if (ImGui::IsItemActivated() || ImGui::IsItemClicked()) {
+        setSingleOrMultiSelection(app->browserSelectedObjects, i, multiSelect);
+        syncSelectedObjectFromBrowser(app);
+      }
 
       ImGui::PopID();
     }
@@ -848,13 +861,14 @@ void drawObjectBrowserWindow(AppState* app) {
   }
 
   if (ImGui::CollapsingHeader("Sketches", ImGuiTreeNodeFlags_DefaultOpen)) {
+    ImGui::TextDisabled("V  L  Name");
     for (int i = 0; i < 3; ++i) {
       auto& meta = app->sketchMeta[i];
       ImGui::PushID(1000 + i);
 
-      ImGui::Checkbox("##skvis", &meta.visible);
+      const bool changedVisibility = ImGui::Checkbox("##skvis", &meta.visible);
       ImGui::SameLine();
-      ImGui::Checkbox("##sklock", &meta.locked);
+      const bool changedLock = ImGui::Checkbox("##sklock", &meta.locked);
       ImGui::SameLine();
 
       const bool selected = hasIndex(app->browserSelectedSketches, i);
@@ -867,6 +881,21 @@ void drawObjectBrowserWindow(AppState* app) {
       ImGui::SameLine();
       ImGui::SetNextItemWidth(-1.0f);
       ImGui::InputText("##skname", meta.name.data(), meta.name.size());
+      if (ImGui::IsItemActivated() || ImGui::IsItemClicked()) {
+        setSingleOrMultiSelection(app->browserSelectedSketches, i, multiSelect);
+        if (app->browserSelectedSketches.size() == 1) {
+          app->activePlane = static_cast<SketchPlane>(app->browserSelectedSketches[0]);
+        }
+      }
+
+      if ((changedVisibility || changedLock) &&
+          app->activePlane == static_cast<SketchPlane>(i) &&
+          (!meta.visible || meta.locked)) {
+        app->sketchTool.cancel();
+        app->sketchTool.setTool(Tool::None);
+        app->extrudeTool.cancel();
+        app->activeSketch().clearSelection();
+      }
 
       ImGui::PopID();
     }
@@ -1371,9 +1400,11 @@ int main() {
             app.selectedObject = hit;
             if (hit >= 0) {
               app.browserSelectedObjects.assign(1, hit);
+              syncSelectedObjectFromBrowser(&app);
               app.status = "Object selected (File > Export STL to save)";
             } else {
               app.browserSelectedObjects.clear();
+              syncSelectedObjectFromBrowser(&app);
               app.status = "Ready";
             }
           }
