@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <optional>
 #include <vector>
 
@@ -29,13 +30,13 @@ class SketchTool {
   void mouseClick(glm::vec2 planePos);
   void cancel();
 
-  // Returns true when the tool can accept a typed dimension value.
-  bool wantsDimension() const;
-  const char* dimensionPrompt() const;
-  void applyDimension(float valueMm);
+  int dimensionInputCount() const;
+  const char* dimensionPrompt(int index) const;
+  void setDimensionValue(int index, std::optional<float> valueMm);
+  bool finishFromDimensions();
 
   // Retrieve (and consume) the completed primitive, if any.
-  std::optional<SketchPrimitive> takeResult();
+  std::optional<CompletedSketchPrimitive> takeResult();
 
   // Append preview line segments for the tool's in-progress geometry.
   void appendPreview(std::vector<ColorVertex>& lines, SketchPlane plane) const;
@@ -43,10 +44,16 @@ class SketchTool {
  private:
   enum class Step { Idle, Step1, Step2 };
 
+  glm::vec2 lineEndPoint() const;
+  glm::vec2 rectangleCorner() const;
+  float circleRadius() const;
+  void resetDimensions();
+
   Tool tool_ = Tool::None;
   Step step_ = Step::Idle;
   glm::vec2 firstPoint_{0.0f};
   glm::vec2 secondPoint_{0.0f};
   glm::vec2 cursor_{0.0f};
-  std::optional<SketchPrimitive> result_;
+  std::array<std::optional<float>, 2> dimensions_;
+  std::optional<CompletedSketchPrimitive> result_;
 };

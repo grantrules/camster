@@ -1,5 +1,8 @@
 #include <array>
+#include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <future>
 #include <iostream>
@@ -8,6 +11,11 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#ifndef _WIN32
+#  include <unistd.h>
+#  include <sys/types.h>
+#endif
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -19,6 +27,7 @@
 #include "ColorVertex.hpp"
 #include "Gizmo.hpp"
 #include "Project.hpp"
+#include "PrintSettings.hpp"
 #include "Scene.hpp"
 #include "StlMesh.hpp"
 #include "VulkanRenderer.hpp"
@@ -26,11 +35,90 @@
 #include "sketch/Profile.hpp"
 #include "sketch/Sketch.hpp"
 #include "sketch/SketchTool.hpp"
+#include "sketch/Constraint.hpp"
 #include "ui/FileBrowser.hpp"
 #include "ui/Toolbar.hpp"
+#include "ui/PrintWindow.hpp"
 
 namespace {
+enum class BooleanOp { Add, Subtract };
+
+enum class ObjectPickMode {
+  None,
+  ExtrudeTargets,
+  CombineTargets,
+  CombineTools,
+};
+
+struct ExtrudeOptionsState {
+  bool visible = false;
+  bool applyRequested = false;
+  BooleanOp operation = BooleanOp::Add;
+  std::vector<int> targets;
+  char depthBuffer[64] = {};
+};
+
+struct CombineOptionsState {
+  bool visible = false;
+  BooleanOp operation = BooleanOp::Add;
+  bool keepTools = false;
+  std::vector<int> targets;
+  std::vector<int> tools;
+};
+
+struct Aabb {
+  glm::vec3 min{0.0f};
+  glm::vec3 max{0.0f};
+  bool valid = false;
+};
+
+void addUniqueIndex(std::vector<int>& list, int idx) {
+  if (idx < 0) return;
+  if (std::find(list.begin(), list.end(), idx) == list.end()) {
+    list.push_back(idx);
+  }
+}
+
+void sanitizeObjectIndices(std::vector<int>& list, int objectCount) {
+  list.erase(std::remove_if(list.begin(), list.end(), [objectCount](int idx) {
+               return idx < 0 || idx >= objectCount;
+             }),
+             list.end());
+  std::sort(list.begin(), list.end());
+  list.erase(std::unique(list.begin(), list.end()), list.end());
+}
+
+void eraseIndex(std::vector<int>& list, int idx) {
+  list.erase(std::remove(list.begin(), list.end(), idx), list.end());
+}
+
+Aabb meshAabb(const StlMesh& mesh) {
+  Aabb box;
+  const auto& verts = mesh.vertices();
+  if (verts.empty()) return box;
+  box.min = verts[0].position;
+  box.max = verts[0].position;
+  box.valid = true;
+  for (const auto& v : verts) {
+    box.min = glm::min(box.min, v.position);
+    box.max = glm::max(box.max, v.position);
+  }
+  return box;
+}
+
+bool aabbOverlap(const Aabb& a, const Aabb& b) {
+  if (!a.valid || !b.valid) return false;
+  return a.min.x <= b.max.x && a.max.x >= b.min.x &&
+         a.min.y <= b.max.y && a.max.y >= b.min.y &&
+         a.min.z <= b.max.z && a.max.z >= b.min.z;
+}
+
 struct AppState {
+  // 3D Print
+  PrintSettings printSettings;
+  PrintWindow   printWindow;
+  FileBrowser   slicerBrowser;
+
   VulkanRenderer renderer;
   CameraController camera;
   StlMesh mesh;       // combined mesh sent to renderer
@@ -40,6 +128,9 @@ struct AppState {
   // Individual mesh objects for selection / export.
   std::vector<StlMesh> sceneObjects;
   int selectedObject = -1;  // index into sceneObjects, -1 = none
+  ObjectPickMode objectPickMode = ObjectPickMode::None;
+  ExtrudeOptionsState extrudeOptions;
+  CombineOptionsState combineOptions;
 
   // Scene / sketch state.
   SceneMode sceneMode = SceneMode::View3D;
@@ -51,7 +142,6 @@ struct AppState {
   Toolbar toolbar;
   AppSettings appSettings;
   Project project;
-  bool extrudeButtonPressed = false;  // set by toolbar, consumed by main loop
   bool showAppSettings = false;
   bool showProjectSettings = false;
 
@@ -84,12 +174,221 @@ void framebufferResizeCallback(GLFWwindow* window, int, int) {
   }
 }
 
+// Launch an external slicer with the given STL file.  The slicer runs
+// independently; we do not wait for it to exit.
+bool launchSlicer(const std::string& slicerPath, const std::string& stlPath) {
+#ifdef _WIN32
+  // Windows: spawn via cmd /c to avoid blocking the main process.
+  std::string cmd = "\"\"" + slicerPath + "\" \"" + stlPath + "\"\"";
+  return std::system(cmd.c_str()) == 0;
+#else
+  pid_t pid = ::fork();
+  if (pid < 0) return false;
+  if (pid == 0) {
+    // Child: exec the slicer detached from this process.
+    const char* args[] = {slicerPath.c_str(), stlPath.c_str(), nullptr};
+    ::execvp(slicerPath.c_str(), const_cast<char* const*>(args));
+    ::_exit(1);  // exec failed
+  }
+  return true;  // parent continues immediately
+#endif
+}
+
 void rebuildCombinedMesh(AppState* app) {
   app->mesh = StlMesh();
   for (const auto& obj : app->sceneObjects) {
     app->mesh.append(obj);
   }
   app->renderer.setMesh(app->mesh);
+}
+
+bool applyAddExtrude(AppState* app, const StlMesh& extruded,
+                     const std::vector<int>& targetsRaw) {
+  if (extruded.empty()) return false;
+
+  std::vector<int> targets = targetsRaw;
+  sanitizeObjectIndices(targets, static_cast<int>(app->sceneObjects.size()));
+
+  if (targets.empty()) {
+    app->sceneObjects.push_back(extruded);
+    app->selectedObject = static_cast<int>(app->sceneObjects.size()) - 1;
+    rebuildCombinedMesh(app);
+    return true;
+  }
+
+  StlMesh merged;
+  for (int idx : targets) {
+    merged.append(app->sceneObjects[idx]);
+  }
+  merged.append(extruded);
+
+  std::vector<bool> remove(app->sceneObjects.size(), false);
+  for (int idx : targets) remove[idx] = true;
+
+  std::vector<StlMesh> next;
+  next.reserve(app->sceneObjects.size() + 1);
+  for (int i = 0; i < static_cast<int>(app->sceneObjects.size()); ++i) {
+    if (!remove[i]) next.push_back(std::move(app->sceneObjects[i]));
+  }
+  next.push_back(std::move(merged));
+
+  app->sceneObjects = std::move(next);
+  app->selectedObject = static_cast<int>(app->sceneObjects.size()) - 1;
+  rebuildCombinedMesh(app);
+  return true;
+}
+
+bool applyAddCombine(AppState* app, const std::vector<int>& targetsRaw,
+                     const std::vector<int>& toolsRaw, bool keepTools) {
+  std::vector<int> targets = targetsRaw;
+  std::vector<int> tools = toolsRaw;
+  sanitizeObjectIndices(targets, static_cast<int>(app->sceneObjects.size()));
+  sanitizeObjectIndices(tools, static_cast<int>(app->sceneObjects.size()));
+  for (int idx : targets) {
+    eraseIndex(tools, idx);
+  }
+  if (targets.empty() || tools.empty()) return false;
+
+  StlMesh merged;
+  for (int idx : targets) merged.append(app->sceneObjects[idx]);
+  for (int idx : tools) merged.append(app->sceneObjects[idx]);
+
+  std::vector<bool> remove(app->sceneObjects.size(), false);
+  for (int idx : targets) remove[idx] = true;
+  if (!keepTools) {
+    for (int idx : tools) remove[idx] = true;
+  }
+
+  std::vector<StlMesh> next;
+  next.reserve(app->sceneObjects.size() + 1);
+  for (int i = 0; i < static_cast<int>(app->sceneObjects.size()); ++i) {
+    if (!remove[i]) next.push_back(std::move(app->sceneObjects[i]));
+  }
+  next.push_back(std::move(merged));
+
+  app->sceneObjects = std::move(next);
+  app->selectedObject = static_cast<int>(app->sceneObjects.size()) - 1;
+  rebuildCombinedMesh(app);
+  return true;
+}
+
+bool applySubtractExtrude(AppState* app, const StlMesh& extruded,
+                          const std::vector<int>& targetsRaw) {
+  if (extruded.empty()) return false;
+
+  std::vector<int> targets = targetsRaw;
+  sanitizeObjectIndices(targets, static_cast<int>(app->sceneObjects.size()));
+  if (targets.empty()) return false;
+
+  const Aabb toolBox = meshAabb(extruded);
+  std::vector<bool> remove(app->sceneObjects.size(), false);
+  for (int idx : targets) {
+    if (aabbOverlap(meshAabb(app->sceneObjects[idx]), toolBox)) {
+      remove[idx] = true;
+    }
+  }
+
+  bool removedAny = false;
+  std::vector<StlMesh> next;
+  next.reserve(app->sceneObjects.size());
+  for (int i = 0; i < static_cast<int>(app->sceneObjects.size()); ++i) {
+    if (remove[i]) {
+      removedAny = true;
+      continue;
+    }
+    next.push_back(std::move(app->sceneObjects[i]));
+  }
+
+  if (!removedAny) return false;
+  app->sceneObjects = std::move(next);
+  app->selectedObject = app->sceneObjects.empty() ? -1 : 0;
+  rebuildCombinedMesh(app);
+  return true;
+}
+
+bool applySubtractCombine(AppState* app, const std::vector<int>& targetsRaw,
+                          const std::vector<int>& toolsRaw, bool keepTools) {
+  std::vector<int> targets = targetsRaw;
+  std::vector<int> tools = toolsRaw;
+  sanitizeObjectIndices(targets, static_cast<int>(app->sceneObjects.size()));
+  sanitizeObjectIndices(tools, static_cast<int>(app->sceneObjects.size()));
+  for (int idx : targets) {
+    eraseIndex(tools, idx);
+  }
+  if (targets.empty() || tools.empty()) return false;
+
+  std::vector<Aabb> toolBoxes;
+  toolBoxes.reserve(tools.size());
+  for (int idx : tools) toolBoxes.push_back(meshAabb(app->sceneObjects[idx]));
+
+  std::vector<bool> remove(app->sceneObjects.size(), false);
+  for (int idx : targets) {
+    const Aabb targetBox = meshAabb(app->sceneObjects[idx]);
+    for (const Aabb& tb : toolBoxes) {
+      if (aabbOverlap(targetBox, tb)) {
+        remove[idx] = true;
+        break;
+      }
+    }
+  }
+  if (!keepTools) {
+    for (int idx : tools) remove[idx] = true;
+  }
+
+  bool removedAny = false;
+  std::vector<StlMesh> next;
+  next.reserve(app->sceneObjects.size());
+  for (int i = 0; i < static_cast<int>(app->sceneObjects.size()); ++i) {
+    if (remove[i]) {
+      removedAny = true;
+      continue;
+    }
+    next.push_back(std::move(app->sceneObjects[i]));
+  }
+
+  if (!removedAny) return false;
+  app->sceneObjects = std::move(next);
+  app->selectedObject = app->sceneObjects.empty() ? -1 : 0;
+  rebuildCombinedMesh(app);
+  return true;
+}
+
+void drawObjectSelectionList(const char* title, std::vector<int>& indices,
+                             ObjectPickMode modeForSelect, AppState* app) {
+  sanitizeObjectIndices(indices, static_cast<int>(app->sceneObjects.size()));
+
+  ImGui::TextUnformatted(title);
+  int eraseAt = -1;
+  for (int i = 0; i < static_cast<int>(indices.size()); ++i) {
+    ImGui::PushID((std::string(title) + std::to_string(i)).c_str());
+    if (ImGui::SmallButton("x")) eraseAt = i;
+    ImGui::SameLine();
+    ImGui::Text("Object %d", indices[i] + 1);
+    ImGui::PopID();
+  }
+  if (eraseAt >= 0) indices.erase(indices.begin() + eraseAt);
+
+  const bool selecting = app->objectPickMode == modeForSelect;
+  if (ImGui::Button(selecting ? "Stop" : "Select")) {
+    app->objectPickMode = selecting ? ObjectPickMode::None : modeForSelect;
+  }
+  if (selecting) {
+    ImGui::SameLine();
+    ImGui::TextDisabled("Click an object in 3D view to add");
+  }
+}
+
+std::optional<ImVec2> projectToScreen(glm::vec3 world, const glm::mat4& view,
+                                      const glm::mat4& projection,
+                                      const ImVec2& viewportSize) {
+  const glm::vec4 clip = projection * view * glm::vec4(world, 1.0f);
+  if (clip.w <= 1e-6f) return std::nullopt;
+
+  const glm::vec3 ndc = glm::vec3(clip) / clip.w;
+  if (ndc.z < 0.0f || ndc.z > 1.0f) return std::nullopt;
+
+  return ImVec2((ndc.x * 0.5f + 0.5f) * viewportSize.x,
+                (ndc.y * 0.5f + 0.5f) * viewportSize.y);
 }
 
 // Möller–Trumbore ray-triangle intersection.  Returns distance or -1.
@@ -193,6 +492,11 @@ void drawMenuBar(AppState* app) {
         app->exportBrowser.show({{"STL Files", {".stl"}}}, {}, "Export STL", "Export");
       }
     }
+    ImGui::Separator();
+    if (ImGui::MenuItem("3D Print...", nullptr, false, !app->sceneObjects.empty())) {
+      app->printWindow.show(static_cast<int>(app->sceneObjects.size()),
+                            app->printSettings);
+    }
     ImGui::EndMenu();
   }
 
@@ -213,6 +517,24 @@ void drawMenuBar(AppState* app) {
     }
     if (ImGui::MenuItem("Project Settings...")) {
       app->showProjectSettings = true;
+    }
+    ImGui::EndMenu();
+  }
+
+  if (ImGui::BeginMenu("Tools")) {
+    const bool canCombine = app->sceneMode == SceneMode::View3D &&
+                            app->sceneObjects.size() >= 2;
+    if (ImGui::MenuItem("Combine...", nullptr, false, canCombine)) {
+      app->combineOptions.visible = true;
+      app->combineOptions.operation = BooleanOp::Add;
+      app->combineOptions.keepTools = false;
+      app->combineOptions.targets.clear();
+      app->combineOptions.tools.clear();
+      if (app->selectedObject >= 0) {
+        addUniqueIndex(app->combineOptions.targets, app->selectedObject);
+      }
+      app->objectPickMode = ObjectPickMode::None;
+      app->status = "Combine tool opened";
     }
     ImGui::EndMenu();
   }
@@ -347,6 +669,141 @@ void drawProjectSettingsWindow(AppState* app) {
   ImGui::End();
 }
 
+void drawExtrudeOptionsWindow(AppState* app) {
+  if (!app->extrudeOptions.visible) return;
+  if (!app->extrudeTool.active()) {
+    app->extrudeOptions.visible = false;
+    app->objectPickMode = ObjectPickMode::None;
+    return;
+  }
+
+  ImGui::SetNextWindowSize(ImVec2(460.0f, 0.0f), ImGuiCond_FirstUseEver);
+  bool open = app->extrudeOptions.visible;
+  if (ImGui::Begin("Extrude Options", &open)) {
+    int op = static_cast<int>(app->extrudeOptions.operation);
+    if (ImGui::Combo("Operation", &op, "Add\0Subtract\0")) {
+      app->extrudeOptions.operation = static_cast<BooleanOp>(op);
+    }
+
+    ImGui::Text("Depth:");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(140.0f);
+    ImGui::InputText("##extrudeDepth", app->extrudeOptions.depthBuffer,
+                     sizeof(app->extrudeOptions.depthBuffer));
+    ImGui::SameLine();
+    ImGui::TextDisabled("(%s)", unitSuffix(app->project.defaultUnit));
+
+    ImGui::Separator();
+    drawObjectSelectionList("Target Objects", app->extrudeOptions.targets,
+                            ObjectPickMode::ExtrudeTargets, app);
+
+    ImGui::Separator();
+    bool applyNow = app->extrudeOptions.applyRequested;
+    app->extrudeOptions.applyRequested = false;
+    if (ImGui::Button("Apply")) applyNow = true;
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel")) {
+      app->extrudeTool.cancel();
+      app->extrudeOptions.visible = false;
+      app->objectPickMode = ObjectPickMode::None;
+    }
+
+    if (applyNow) {
+      auto parsed = parseDimension(std::string(app->extrudeOptions.depthBuffer),
+                                   app->project.defaultUnit);
+      if (!parsed) {
+        app->status = "Extrude: enter a valid depth";
+      } else {
+        app->extrudeTool.setDistance(parsed->valueMm);
+        StlMesh extruded = app->extrudeTool.confirm();
+        if (app->extrudeOptions.operation == BooleanOp::Subtract) {
+          if (!applySubtractExtrude(app, extruded, app->extrudeOptions.targets)) {
+            app->status = "Extrude subtract removed no target objects";
+          } else {
+            app->status = "Extrude subtract complete (object-level)";
+          }
+          app->extrudeOptions.visible = false;
+          app->objectPickMode = ObjectPickMode::None;
+        } else {
+          if (!applyAddExtrude(app, extruded, app->extrudeOptions.targets)) {
+            app->status = "Extrude failed";
+          } else {
+            app->status = "Extrude add complete";
+            app->extrudeOptions.visible = false;
+            app->objectPickMode = ObjectPickMode::None;
+          }
+        }
+      }
+    }
+  }
+  ImGui::End();
+
+  app->extrudeOptions.visible = open;
+  if (!app->extrudeOptions.visible && app->objectPickMode == ObjectPickMode::ExtrudeTargets) {
+    app->objectPickMode = ObjectPickMode::None;
+  }
+}
+
+void drawCombineWindow(AppState* app) {
+  if (!app->combineOptions.visible) return;
+
+  ImGui::SetNextWindowSize(ImVec2(520.0f, 0.0f), ImGuiCond_FirstUseEver);
+  bool open = app->combineOptions.visible;
+  if (ImGui::Begin("Combine Tool", &open)) {
+    int op = static_cast<int>(app->combineOptions.operation);
+    if (ImGui::Combo("Operation", &op, "Add\0Subtract\0")) {
+      app->combineOptions.operation = static_cast<BooleanOp>(op);
+    }
+    ImGui::Checkbox("Keep Tools", &app->combineOptions.keepTools);
+
+    ImGui::Separator();
+    drawObjectSelectionList("Target Objects", app->combineOptions.targets,
+                            ObjectPickMode::CombineTargets, app);
+    ImGui::Separator();
+    drawObjectSelectionList("Tool Objects", app->combineOptions.tools,
+                            ObjectPickMode::CombineTools, app);
+
+    ImGui::Separator();
+    ImGui::TextDisabled("Subtract currently uses object-overlap fallback");
+    ImGui::TextDisabled("(removes overlapping targets by AABB)");
+
+    ImGui::Separator();
+    if (ImGui::Button("Apply")) {
+      if (app->combineOptions.operation == BooleanOp::Subtract) {
+        if (!applySubtractCombine(app, app->combineOptions.targets,
+                                  app->combineOptions.tools,
+                                  app->combineOptions.keepTools)) {
+          app->status = "Combine subtract removed no target objects";
+        } else {
+          app->status = "Combine subtract complete (object-level)";
+        }
+      } else if (!applyAddCombine(app, app->combineOptions.targets,
+                                  app->combineOptions.tools,
+                                  app->combineOptions.keepTools)) {
+        app->status = "Combine add requires at least one target and one tool";
+      } else {
+        app->status = "Combine add complete";
+      }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Close")) {
+      app->combineOptions.visible = false;
+      if (app->objectPickMode == ObjectPickMode::CombineTargets ||
+          app->objectPickMode == ObjectPickMode::CombineTools) {
+        app->objectPickMode = ObjectPickMode::None;
+      }
+    }
+  }
+  ImGui::End();
+
+  app->combineOptions.visible = open;
+  if (!app->combineOptions.visible &&
+      (app->objectPickMode == ObjectPickMode::CombineTargets ||
+       app->objectPickMode == ObjectPickMode::CombineTools)) {
+    app->objectPickMode = ObjectPickMode::None;
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -379,6 +836,7 @@ int main() {
 
   app.appSettings.load();  // load saved app settings (no-op if file missing)
   app.project.initFromAppSettings(app.appSettings);
+  app.printSettings.load();
 
   app.sceneObjects.push_back(StlMesh::makeUnitCube());
   rebuildCombinedMesh(&app);
@@ -425,29 +883,75 @@ int main() {
 
       std::vector<std::vector<glm::vec2>> polylines;
       for (size_t idx : sel) {
-        polylines.push_back(profile::tessellate2D(sketch.primitives()[idx]));
+        const auto& elems = sketch.elements();
+        if (!elems[idx].construction)
+          polylines.push_back(profile::tessellate2D(elems[idx].geometry));
       }
 
       auto profiles = profile::chainProfiles(polylines);
       if (!profiles.empty()) {
         app.extrudeTool.begin(std::move(profiles), app.activePlane);
-        // Switch to isometric so the user can see the extrusion in 3D.
         app.camera.snap(CameraController::Orientation::Isometric);
-        app.status = "Drag or type distance, then Confirm";
+        app.extrudeOptions.visible = true;
+        app.extrudeOptions.applyRequested = false;
+        app.extrudeOptions.operation = BooleanOp::Add;
+        app.extrudeOptions.targets.clear();
+        if (app.selectedObject >= 0) {
+          addUniqueIndex(app.extrudeOptions.targets, app.selectedObject);
+        }
+        std::snprintf(app.extrudeOptions.depthBuffer,
+                      sizeof(app.extrudeOptions.depthBuffer),
+                      "%.3f", fromMm(app.extrudeTool.distance(), app.project.defaultUnit));
+        app.objectPickMode = ObjectPickMode::None;
+        app.status = "Set depth/op and target objects in Extrude Options";
       } else {
         app.status = "Selection does not form a closed profile";
       }
     }
 
+    // Handle delete request.
+    if (toolbarAction.deleteRequested) {
+      app.activeSketch().deleteSelected();
+      app.status = "Deleted selected elements";
+    }
+
+    // Handle construction toggle.
+    if (toolbarAction.toggleConstruction) {
+      for (size_t idx : app.activeSketch().selectedIndices()) {
+        app.activeSketch().toggleConstruction(idx);
+      }
+      app.status = "Toggled construction";
+    }
+
+    // Handle constraint requests from toolbar.
+    if (toolbarAction.constraintRequested != ConstraintTool::None) {
+      auto& sketch = app.activeSketch();
+      float valueMm = 0.0f;
+      // Dimensional constraints need a parsed value.
+      if (toolbarAction.constraintRequested == ConstraintTool::Length ||
+          toolbarAction.constraintRequested == ConstraintTool::Radius ||
+          toolbarAction.constraintRequested == ConstraintTool::Angle) {
+        auto parsed = parseDimension(std::string(app.toolbar.constraintValue()),
+                                     app.project.defaultUnit);
+        if (parsed) {
+          valueMm = parsed->valueMm;
+        } else {
+          app.status = (toolbarAction.constraintRequested == ConstraintTool::Angle)
+                           ? "Enter angle in degrees"
+                           : "Enter a value in the Dimension tab";
+          valueMm = -1.0f;  // signal: skip
+        }
+      }
+      if (valueMm >= 0.0f) {
+        app.status = sketch.applyConstraintToSelection(
+            toolbarAction.constraintRequested, valueMm);
+      }
+    }
+
     // Handle extrude confirm.
     if (toolbarAction.extrudeConfirmed && app.extrudeTool.active()) {
-      StlMesh extruded = app.extrudeTool.confirm();
-      if (!extruded.empty()) {
-        app.sceneObjects.push_back(std::move(extruded));
-        app.selectedObject = static_cast<int>(app.sceneObjects.size()) - 1;
-        rebuildCombinedMesh(&app);
-        app.status = "Extruded (click to select, File > Export STL to save)";
-      }
+      app.extrudeOptions.visible = true;
+      app.extrudeOptions.applyRequested = true;
     }
 
     // WantCaptureMouse is true when ImGui has focus (e.g. hovering a window,
@@ -469,16 +973,10 @@ int main() {
         const glm::mat4 view = app.camera.viewMatrix();
         const glm::mat4 proj = app.camera.projectionMatrix(app.renderer.framebufferAspect());
 
-        // Unproject near point as ray origin, far-near as direction.
-        const float ndcX = (2.0f * static_cast<float>(x) / static_cast<float>(fbW)) - 1.0f;
-        const float ndcY = (2.0f * static_cast<float>(y) / static_cast<float>(fbH)) - 1.0f;
-        const glm::mat4 invVP = glm::inverse(proj * view);
-        glm::vec4 nearW = invVP * glm::vec4(ndcX, ndcY, 0.0f, 1.0f);
-        glm::vec4 farW = invVP * glm::vec4(ndcX, ndcY, 1.0f, 1.0f);
-        nearW /= nearW.w;
-        farW /= farW.w;
-        const glm::vec3 rayO(nearW);
-        const glm::vec3 rayD = glm::normalize(glm::vec3(farW - nearW));
+        glm::vec3 rayO, rayD;
+        screenToRay(static_cast<float>(x), static_cast<float>(y),
+                    static_cast<float>(fbW), static_cast<float>(fbH),
+                    view, proj, rayO, rayD);
 
         if (leftDown && !app.wasLeftDown) {
           app.extrudeTool.mouseDown(rayO, rayD);
@@ -501,6 +999,11 @@ int main() {
                                view, proj, app.activePlane);
         if (hit) {
           glm::vec2 planePos = toPlane(*hit, app.activePlane);
+
+          // Snap to existing control points.
+          auto snap = app.activeSketch().snapToPoint(planePos, kSnapThreshold);
+          if (snap) planePos = *snap;
+
           app.sketchTool.mouseMove(planePos);
 
           if (leftDown && !app.wasLeftDown) {
@@ -525,7 +1028,7 @@ int main() {
           // Mouse held: check if we've moved enough to start a drag-select.
           app.dragCurScreen = {static_cast<float>(x), static_cast<float>(y)};
           const glm::vec2 delta = app.dragCurScreen - app.dragStartScreen;
-          if (glm::dot(delta, delta) > 9.0f) {  // 3-pixel threshold
+          if (glm::dot(delta, delta) > kDragThresholdSq) {
             app.dragSelecting = true;
           }
         } else if (!leftDown && app.wasLeftDown) {
@@ -554,7 +1057,7 @@ int main() {
                                    view, proj, app.activePlane);
             if (hit) {
               glm::vec2 planePos = toPlane(*hit, app.activePlane);
-              auto idx = app.activeSketch().hitTest(planePos, 5.0f);
+              auto idx = app.activeSketch().hitTest(planePos, kHitTestThreshold);
               if (idx) {
                 if (ctrlHeld) {
                   app.activeSketch().toggleSelect(*idx);
@@ -563,6 +1066,43 @@ int main() {
                 }
               } else if (!ctrlHeld) {
                 app.activeSketch().clearSelection();
+              }
+            }
+          }
+        }
+
+      } else if (app.objectPickMode != ObjectPickMode::None) {
+        // --- Object-pick mode for Extrude/Combine lists ---
+        if (leftDown && !app.wasLeftDown) {
+          app.dragStartScreen = {static_cast<float>(x), static_cast<float>(y)};
+        } else if (!leftDown && app.wasLeftDown) {
+          const glm::vec2 cur(static_cast<float>(x), static_cast<float>(y));
+          if (glm::dot(cur - app.dragStartScreen, cur - app.dragStartScreen) <
+              kDragThresholdSq) {
+            int fbW = 0, fbH = 0;
+            glfwGetFramebufferSize(window, &fbW, &fbH);
+            const glm::mat4 view = app.camera.viewMatrix();
+            const glm::mat4 proj =
+                app.camera.projectionMatrix(app.renderer.framebufferAspect());
+
+            glm::vec3 rayO, rayD;
+            screenToRay(static_cast<float>(x), static_cast<float>(y),
+                        static_cast<float>(fbW), static_cast<float>(fbH),
+                        view, proj, rayO, rayD);
+
+            const int hit = pickObject(app, rayO, rayD);
+            if (hit >= 0) {
+              if (app.objectPickMode == ObjectPickMode::ExtrudeTargets) {
+                addUniqueIndex(app.extrudeOptions.targets, hit);
+                app.status = "Added object to extrude target list";
+              } else if (app.objectPickMode == ObjectPickMode::CombineTargets) {
+                addUniqueIndex(app.combineOptions.targets, hit);
+                eraseIndex(app.combineOptions.tools, hit);
+                app.status = "Added object to combine target list";
+              } else if (app.objectPickMode == ObjectPickMode::CombineTools) {
+                addUniqueIndex(app.combineOptions.tools, hit);
+                eraseIndex(app.combineOptions.targets, hit);
+                app.status = "Added object to combine tool list";
               }
             }
           }
@@ -582,23 +1122,17 @@ int main() {
 
           // If mouse barely moved, treat as a click → pick object.
           const glm::vec2 cur(static_cast<float>(x), static_cast<float>(y));
-          if (glm::dot(cur - app.dragStartScreen, cur - app.dragStartScreen) < 9.0f) {
+          if (glm::dot(cur - app.dragStartScreen, cur - app.dragStartScreen) < kDragThresholdSq) {
             int fbW = 0, fbH = 0;
             glfwGetFramebufferSize(window, &fbW, &fbH);
             const glm::mat4 view = app.camera.viewMatrix();
             const glm::mat4 proj =
                 app.camera.projectionMatrix(app.renderer.framebufferAspect());
-            const float ndcX =
-                (2.0f * static_cast<float>(x) / static_cast<float>(fbW)) - 1.0f;
-            const float ndcY =
-                (2.0f * static_cast<float>(y) / static_cast<float>(fbH)) - 1.0f;
-            const glm::mat4 invVP = glm::inverse(proj * view);
-            glm::vec4 nearW = invVP * glm::vec4(ndcX, ndcY, 0.0f, 1.0f);
-            glm::vec4 farW = invVP * glm::vec4(ndcX, ndcY, 1.0f, 1.0f);
-            nearW /= nearW.w;
-            farW /= farW.w;
-            const glm::vec3 rayO(nearW);
-            const glm::vec3 rayD = glm::normalize(glm::vec3(farW - nearW));
+
+            glm::vec3 rayO, rayD;
+            screenToRay(static_cast<float>(x), static_cast<float>(y),
+                        static_cast<float>(fbW), static_cast<float>(fbH),
+                        view, proj, rayO, rayD);
 
             int hit = pickObject(app, rayO, rayD);
             app.selectedObject = hit;
@@ -621,8 +1155,12 @@ int main() {
 
     // Escape key: cancel extrude, cancel active tool, or exit sketch mode.
     if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
-      if (app.extrudeTool.active()) {
+      if (app.objectPickMode != ObjectPickMode::None) {
+        app.objectPickMode = ObjectPickMode::None;
+        app.status = "Selection mode cancelled";
+      } else if (app.extrudeTool.active()) {
         app.extrudeTool.cancel();
+        app.extrudeOptions.visible = false;
         app.status = "Extrude cancelled";
       } else if (app.sketchTool.activeTool() != Tool::None) {
         app.sketchTool.cancel();
@@ -631,19 +1169,102 @@ int main() {
       }
     }
 
+    // Delete key: remove selected sketch elements.
+    if (app.sceneMode == SceneMode::Sketch &&
+        (glfwGetKey(window, GLFW_KEY_DELETE) == GLFW_PRESS ||
+         glfwGetKey(window, GLFW_KEY_BACKSPACE) == GLFW_PRESS)) {
+      if (app.activeSketch().hasSelection()) {
+        app.activeSketch().deleteSelected();
+        app.status = "Deleted selected elements";
+      }
+    }
+
+    // Right-click context menu (sketch mode).
+    if (app.sceneMode == SceneMode::Sketch && !app.extrudeTool.active()) {
+      if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS &&
+          !io.WantCaptureMouse) {
+        ImGui::OpenPopup("##sketchCtx");
+      }
+      if (ImGui::BeginPopup("##sketchCtx")) {
+        if (ImGui::MenuItem("Select", nullptr, false, true)) {
+          app.sketchTool.setTool(Tool::None);
+        }
+        if (ImGui::MenuItem("Line")) app.sketchTool.setTool(Tool::Line);
+        if (ImGui::MenuItem("Rectangle")) app.sketchTool.setTool(Tool::Rectangle);
+        if (ImGui::MenuItem("Circle")) app.sketchTool.setTool(Tool::Circle);
+        if (ImGui::MenuItem("Arc")) app.sketchTool.setTool(Tool::Arc);
+        ImGui::Separator();
+        bool hasSel = app.activeSketch().hasSelection();
+        if (ImGui::MenuItem("Toggle Construction", nullptr, false, hasSel)) {
+          for (size_t idx : app.activeSketch().selectedIndices()) {
+            app.activeSketch().toggleConstruction(idx);
+          }
+        }
+        if (ImGui::MenuItem("Delete", "Del", false, hasSel)) {
+          app.activeSketch().deleteSelected();
+          app.status = "Deleted selected elements";
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Horizontal", nullptr, false, hasSel)) {
+          app.activeSketch().applyConstraintToSelection(ConstraintTool::Horizontal, 0.0f);
+        }
+        if (ImGui::MenuItem("Vertical", nullptr, false, hasSel)) {
+          app.activeSketch().applyConstraintToSelection(ConstraintTool::Vertical, 0.0f);
+        }
+        if (ImGui::MenuItem("Fixed", nullptr, false, hasSel)) {
+          app.activeSketch().applyConstraintToSelection(ConstraintTool::Fixed, 0.0f);
+        }
+        ImGui::EndPopup();
+      }
+    }
+
     // Consume completed sketch primitives.
     if (auto prim = app.sketchTool.takeResult()) {
-      app.activeSketch().addPrimitive(std::move(*prim));
+      app.activeSketch().addCompletedPrimitive(std::move(*prim));
     }
 
     // --- Build line data every frame ---
     std::vector<ColorVertex> allLines;
+    std::vector<SketchDimensionLabel> dimensionLabels;
+    std::vector<std::vector<glm::vec2>> filledProfiles;
+    std::vector<glm::vec2> danglingPoints;
     app.gizmo.appendLines(allLines);
 
     if (app.sceneMode == SceneMode::Sketch) {
       appendGrid(allLines, app.activePlane, app.project.gridExtent, app.project.gridSpacing);
       app.activeSketch().appendLines(allLines, app.activePlane);
+      app.activeSketch().appendConstraintAnnotations(allLines, app.activePlane);
+      app.activeSketch().appendConstraintLabels(dimensionLabels, app.activePlane,
+                                               app.project.defaultUnit);
+      filledProfiles = app.activeSketch().closedProfiles();
+      danglingPoints = app.activeSketch().danglingEndpoints();
       app.sketchTool.appendPreview(allLines, app.activePlane);
+
+      // Snap indicator: show a small preview cross at the snap point when drawing.
+      if (app.sketchTool.activeTool() != Tool::None) {
+        double mx = 0.0, my = 0.0;
+        glfwGetCursorPos(window, &mx, &my);
+        int fbW = 0, fbH = 0;
+        glfwGetFramebufferSize(window, &fbW, &fbH);
+        const glm::mat4 view = app.camera.viewMatrix();
+        const glm::mat4 proj = app.camera.projectionMatrix(app.renderer.framebufferAspect());
+        auto hit = rayPlaneHit(static_cast<float>(mx), static_cast<float>(my),
+                               static_cast<float>(fbW), static_cast<float>(fbH),
+                               view, proj, app.activePlane);
+        if (hit) {
+          glm::vec2 pp = toPlane(*hit, app.activePlane);
+          auto snap = app.activeSketch().snapToPoint(pp, kSnapThreshold);
+          if (snap) {
+            const float sz = kSnapIndicatorSize;
+            const glm::vec4 snapColor{0.0f, 1.0f, 1.0f, 1.0f};
+            glm::vec2 s = *snap;
+            allLines.push_back({toWorld(s + glm::vec2(-sz, 0.0f), app.activePlane), snapColor});
+            allLines.push_back({toWorld(s + glm::vec2(sz, 0.0f), app.activePlane), snapColor});
+            allLines.push_back({toWorld(s + glm::vec2(0.0f, -sz), app.activePlane), snapColor});
+            allLines.push_back({toWorld(s + glm::vec2(0.0f, sz), app.activePlane), snapColor});
+          }
+        }
+      }
     }
 
     // Extrude preview lines (visible from any view).
@@ -674,6 +1295,8 @@ int main() {
     drawPanel(&app);
     drawAppSettingsWindow(&app);
     drawProjectSettingsWindow(&app);
+    drawExtrudeOptionsWindow(&app);
+    drawCombineWindow(&app);
 
     // --- File browser (modal — drawn every frame while visible) ---
     if (app.fileBrowser.isVisible()) {
@@ -723,6 +1346,51 @@ int main() {
       }
     }
 
+    // --- 3D Print window ---
+    if (app.printWindow.isVisible()) {
+      if (app.printWindow.draw(app.sceneObjects, app.printSettings)) {
+        // User clicked Print: merge selected objects into a temp STL and
+        // launch the slicer.
+        const auto& sel = app.printWindow.selectedObjects();
+        StlMesh exportMesh;
+        for (int i = 0; i < static_cast<int>(app.sceneObjects.size()); ++i) {
+          if (i < static_cast<int>(sel.size()) && sel[i])
+            exportMesh.append(app.sceneObjects[i]);
+        }
+        if (!exportMesh.empty()) {
+          const auto tmpPath =
+              (std::filesystem::temp_directory_path() / "camster_print.stl").string();
+          std::string err;
+          const bool exported = exportMesh.saveAsBinary(tmpPath, err);
+          if (!exported) {
+            app.status = "3D Print: export failed: " + err;
+          } else {
+            app.printSettings.addRecent(app.printWindow.currentSlicer());
+            app.printSettings.save();
+            if (!launchSlicer(app.printWindow.currentSlicer(), tmpPath)) {
+              app.status = "3D Print: failed to launch slicer";
+            } else {
+              app.status = "Opened in slicer: " + app.printWindow.currentSlicer();
+            }
+          }
+        }
+      }
+    }
+
+    // --- Slicer file browser (opened by PrintWindow "Browse" button) ---
+    if (app.printWindow.slicerBrowseRequested()) {
+      app.printWindow.consumeBrowseRequest();
+      app.slicerBrowser.show({}, {}, "Select Slicer Executable", "Select");
+    }
+    if (app.slicerBrowser.isVisible()) {
+      if (app.slicerBrowser.draw() && app.slicerBrowser.confirmed()) {
+        const std::string path = app.slicerBrowser.selectedPath().string();
+        app.printWindow.setSlicerPath(path);
+        app.printSettings.addRecent(path);
+        app.printSettings.save();
+      }
+    }
+
     // --- Rubber-band selection overlay ---
     if (app.dragSelecting) {
       ImDrawList* dl = ImGui::GetForegroundDrawList();
@@ -730,6 +1398,39 @@ int main() {
       ImVec2 p2(app.dragCurScreen.x, app.dragCurScreen.y);
       dl->AddRectFilled(p1, p2, IM_COL32(0, 120, 255, 40));
       dl->AddRect(p1, p2, IM_COL32(0, 120, 255, 200), 0.0f, 0, 1.5f);
+    }
+
+    if (app.sceneMode == SceneMode::Sketch) {
+      ImDrawList* dl = ImGui::GetForegroundDrawList();
+      const ImVec2 viewportSize = ImGui::GetIO().DisplaySize;
+      const glm::mat4 view = app.camera.viewMatrix();
+      const glm::mat4 proj = app.camera.projectionMatrix(app.renderer.framebufferAspect());
+
+      for (const auto& profile : filledProfiles) {
+        const auto tris = profile::triangulate2D(profile);
+        for (const auto& tri : tris) {
+          auto a = projectToScreen(toWorld(profile[tri[0]], app.activePlane), view, proj,
+                                   viewportSize);
+          auto b = projectToScreen(toWorld(profile[tri[1]], app.activePlane), view, proj,
+                                   viewportSize);
+          auto c = projectToScreen(toWorld(profile[tri[2]], app.activePlane), view, proj,
+                                   viewportSize);
+          if (!a || !b || !c) continue;
+          dl->AddTriangleFilled(*a, *b, *c, IM_COL32(90, 170, 255, 28));
+        }
+      }
+
+      for (const glm::vec2& pt : danglingPoints) {
+        auto screenPos = projectToScreen(toWorld(pt, app.activePlane), view, proj, viewportSize);
+        if (!screenPos) continue;
+        dl->AddCircleFilled(*screenPos, 4.0f, IM_COL32(230, 60, 60, 255), 16);
+      }
+
+      for (const auto& label : dimensionLabels) {
+        auto screenPos = projectToScreen(label.worldPos, view, proj, viewportSize);
+        if (!screenPos) continue;
+        dl->AddText(*screenPos, IM_COL32(235, 235, 170, 255), label.text.c_str());
+      }
     }
 
     ImGui::Render();

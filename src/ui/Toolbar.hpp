@@ -1,22 +1,31 @@
 #pragma once
 
 #include "Units.hpp"
+#include "sketch/Constraint.hpp"
 #include "sketch/ExtrudeTool.hpp"
 #include "sketch/SketchTool.hpp"
 
 struct ToolbarAction {
-  bool extrudeRequested = false;  // user clicked "Extrude" to start
-  bool extrudeConfirmed = false;  // user clicked "Confirm" to finish
+  bool extrudeRequested = false;
+  bool extrudeConfirmed = false;
+  bool deleteRequested = false;
+  bool toggleConstruction = false;
+  ConstraintTool constraintRequested = ConstraintTool::None;
 };
 
 // Horizontal toolbar rendered at the top of the viewport (below the menu bar)
-// when the scene is in sketch mode.  Provides tool-selection buttons, an
-// optional dimension-input field, and extrude controls.
+// when the scene is in sketch mode.  Provides tabbed tool-selection buttons,
+// an optional dimension-input field, and extrude controls.
 class Toolbar {
  public:
   ToolbarAction draw(SketchTool& tool, ExtrudeTool& extrude, bool hasSelection, Unit defaultUnit);
+  const char* constraintValue() const { return constraintValueBuffer_; }
 
  private:
-  char dimBuffer_[128] = {};
+  enum class Tab { Sketch, Constrain, Dimension };
+  Tab activeTab_ = Tab::Sketch;
+  char dimBufferA_[128] = {};
+  char dimBufferB_[128] = {};
   char extrudeBuffer_[128] = {};
+  char constraintValueBuffer_[128] = {};
 };
