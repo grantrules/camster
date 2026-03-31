@@ -371,6 +371,93 @@ void setSelectionRange(std::vector<int>& selection, int start, int end) {
   for (int i = start; i <= end; ++i) selection.push_back(i);
 }
 
+glm::vec2 projectPointBetweenSketchPlanes(glm::vec2 srcPoint,
+                                          SketchPlane srcPlane,
+                                          float srcOffsetMm,
+                                          SketchPlane dstPlane,
+                                          float /*dstOffsetMm*/) {
+  const glm::vec3 world = toWorld(srcPoint, srcPlane, srcOffsetMm);
+  return toPlane(world, dstPlane);
+}
+
+std::vector<SketchElement> projectElementBetweenSketchPlanes(const SketchElement& src,
+                                                             SketchPlane srcPlane,
+                                                             float srcOffsetMm,
+                                                             SketchPlane dstPlane,
+                                                             float dstOffsetMm) {
+  std::vector<SketchElement> out;
+  const auto makeLine = [&](glm::vec2 a, glm::vec2 b, bool construction) {
+    SketchElement elem;
+    elem.geometry = SketchLine{a, b};
+    elem.construction = construction;
+    out.push_back(std::move(elem));
+  };
+
+  std::visit(
+      [&](const auto& prim) {
+        using T = std::decay_t<decltype(prim)>;
+        if constexpr (std::is_same_v<T, SketchLine>) {
+          SketchElement elem;
+          elem.geometry = SketchLine{
+              projectPointBetweenSketchPlanes(prim.start, srcPlane, srcOffsetMm, dstPlane,
+                                              dstOffsetMm),
+              projectPointBetweenSketchPlanes(prim.end, srcPlane, srcOffsetMm, dstPlane,
+                                              dstOffsetMm)};
+          elem.construction = src.construction;
+          out.push_back(std::move(elem));
+        } else if constexpr (std::is_same_v<T, SketchRect>) {
+          const glm::vec2 c0{prim.min.x, prim.min.y};
+          const glm::vec2 c1{prim.max.x, prim.min.y};
+          const glm::vec2 c2{prim.max.x, prim.max.y};
+          const glm::vec2 c3{prim.min.x, prim.max.y};
+          const glm::vec2 p0 = projectPointBetweenSketchPlanes(c0, srcPlane, srcOffsetMm,
+                                                                dstPlane, dstOffsetMm);
+          const glm::vec2 p1 = projectPointBetweenSketchPlanes(c1, srcPlane, srcOffsetMm,
+                                                                dstPlane, dstOffsetMm);
+          const glm::vec2 p2 = projectPointBetweenSketchPlanes(c2, srcPlane, srcOffsetMm,
+                                                                dstPlane, dstOffsetMm);
+          const glm::vec2 p3 = projectPointBetweenSketchPlanes(c3, srcPlane, srcOffsetMm,
+                                                                dstPlane, dstOffsetMm);
+          makeLine(p0, p1, src.construction);
+          makeLine(p1, p2, src.construction);
+          makeLine(p2, p3, src.construction);
+          makeLine(p3, p0, src.construction);
+        } else if constexpr (std::is_same_v<T, SketchCircle>) {
+          constexpr int kSegments = 48;
+          for (int i = 0; i < kSegments; ++i) {
+            const float t0 = (2.0f * 3.1415926535f * static_cast<float>(i)) /
+                             static_cast<float>(kSegments);
+            const float t1 = (2.0f * 3.1415926535f * static_cast<float>(i + 1)) /
+                             static_cast<float>(kSegments);
+            const glm::vec2 s0 = prim.center + prim.radius * glm::vec2(std::cos(t0), std::sin(t0));
+            const glm::vec2 s1 = prim.center + prim.radius * glm::vec2(std::cos(t1), std::sin(t1));
+            makeLine(projectPointBetweenSketchPlanes(s0, srcPlane, srcOffsetMm, dstPlane,
+                                                     dstOffsetMm),
+                     projectPointBetweenSketchPlanes(s1, srcPlane, srcOffsetMm, dstPlane,
+                                                     dstOffsetMm),
+                     src.construction);
+          }
+        } else if constexpr (std::is_same_v<T, SketchArc>) {
+          constexpr int kSegments = 24;
+          const float totalSweep = prim.sweepAngle;
+          for (int i = 0; i < kSegments; ++i) {
+            const float a0 = prim.startAngle + totalSweep * (static_cast<float>(i) / kSegments);
+            const float a1 = prim.startAngle + totalSweep * (static_cast<float>(i + 1) / kSegments);
+            const glm::vec2 s0 = prim.center + prim.radius * glm::vec2(std::cos(a0), std::sin(a0));
+            const glm::vec2 s1 = prim.center + prim.radius * glm::vec2(std::cos(a1), std::sin(a1));
+            makeLine(projectPointBetweenSketchPlanes(s0, srcPlane, srcOffsetMm, dstPlane,
+                                                     dstOffsetMm),
+                     projectPointBetweenSketchPlanes(s1, srcPlane, srcOffsetMm, dstPlane,
+                                                     dstOffsetMm),
+                     src.construction);
+          }
+        }
+      },
+      src.geometry);
+
+  return out;
+}
+
 void beginObjectRename(AppState* app, int idx) {
   if (idx < 0 || idx >= static_cast<int>(app->sceneObjectMeta.size())) return;
   app->renameObjectIndex = idx;
@@ -1060,12 +1147,28 @@ void drawProjectToolWindow(AppState* app) {
       app->status = "Active sketch is locked or source is empty";
     } else {
       int copied = 0;
+      int created = 0;
+      const SketchPlane srcPlane = app->sketches[app->projectSourceSketchIndex].plane;
+      const float srcOffset = app->sketches[app->projectSourceSketchIndex].offsetMm;
+      const SketchPlane dstPlane = app->activePlane();
+      const float dstOffset = app->activePlaneOffset();
       for (size_t i = 0; i < elems.size(); ++i) {
         if (!app->projectSelectionMask[i]) continue;
-        app->activeSketch().addElement(elems[i]);
+        const auto projected = projectElementBetweenSketchPlanes(
+            elems[i], srcPlane, srcOffset, dstPlane, dstOffset);
+        for (const auto& elem : projected) {
+          app->activeSketch().addElement(elem);
+          ++created;
+        }
         ++copied;
       }
-      app->status = copied > 0 ? "Projected elements into active sketch" : "No elements selected";
+      if (copied > 0) {
+        app->status = "Projected " + std::to_string(copied) +
+                      " source element(s) as " + std::to_string(created) +
+                      " projected element(s)";
+      } else {
+        app->status = "No elements selected";
+      }
     }
   }
 
@@ -1404,6 +1507,9 @@ void drawObjectBrowserWindow(AppState* app) {
     }
     if (app->sketches.empty()) {
       ImGui::TextDisabled("(no sketches)");
+    } else if (app->sceneMode == SceneMode::Sketch && app->hasActiveSketch() &&
+               app->activeSketchIndex + 1 < static_cast<int>(app->sketches.size())) {
+      ImGui::TextDisabled("Future sketches are hidden while editing this sketch");
     }
   }
 
