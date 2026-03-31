@@ -57,9 +57,15 @@ target_link_libraries(imgui PUBLIC glfw Vulkan::Vulkan)
 set(CAMSTER_SOURCES
   src/main.cpp
   src/CameraController.cpp
+  src/Gizmo.cpp
   src/StlMesh.cpp
   src/VulkanRenderer.cpp
+  src/sketch/Extrude.cpp
+  src/sketch/ExtrudeTool.cpp
+  src/sketch/Sketch.cpp
+  src/sketch/SketchTool.cpp
   src/ui/FileBrowser.cpp
+  src/ui/Toolbar.cpp
 )
 
 add_executable(camster ${CAMSTER_SOURCES})
@@ -98,6 +104,8 @@ file(MAKE_DIRECTORY ${SHADER_OUTPUT_DIR})
 set(SHADER_SOURCES
   ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/mesh.vert
   ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/mesh.frag
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/line.vert
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/shaders/line.frag
 )
 
 set(COMPILED_SHADERS)

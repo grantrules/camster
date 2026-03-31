@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <future>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <string>
 #include <utility>
@@ -14,19 +15,52 @@
 #include <imgui.h>
 
 #include "CameraController.hpp"
+#include "ColorVertex.hpp"
+#include "Gizmo.hpp"
+#include "Project.hpp"
+#include "Scene.hpp"
 #include "StlMesh.hpp"
 #include "VulkanRenderer.hpp"
+#include "sketch/ExtrudeTool.hpp"
+#include "sketch/Profile.hpp"
+#include "sketch/Sketch.hpp"
+#include "sketch/SketchTool.hpp"
 #include "ui/FileBrowser.hpp"
+#include "ui/Toolbar.hpp"
 
 namespace {
 struct AppState {
   VulkanRenderer renderer;
   CameraController camera;
-  StlMesh mesh;
+  StlMesh mesh;       // combined mesh sent to renderer
   FileBrowser fileBrowser;
+  FileBrowser exportBrowser;  // separate browser instance for export
+
+  // Individual mesh objects for selection / export.
+  std::vector<StlMesh> sceneObjects;
+  int selectedObject = -1;  // index into sceneObjects, -1 = none
+
+  // Scene / sketch state.
+  SceneMode sceneMode = SceneMode::View3D;
+  SketchPlane activePlane = SketchPlane::XY;
+  Sketch sketches[3];  // one per SketchPlane
+  SketchTool sketchTool;
+  ExtrudeTool extrudeTool;
+  Gizmo gizmo;
+  Toolbar toolbar;
+  Project project;
+  bool extrudeButtonPressed = false;  // set by toolbar, consumed by main loop
+
+  Sketch& activeSketch() { return sketches[static_cast<int>(activePlane)]; }
 
   std::string status = "Ready";
   bool dragging = false;
+  bool wasLeftDown = false;  // for click-edge detection
+
+  // Rubber-band drag selection state.
+  bool dragSelecting = false;
+  glm::vec2 dragStartScreen{0.0f};  // screen pixel position
+  glm::vec2 dragCurScreen{0.0f};
 
   struct LoadResult {
     bool success = false;
@@ -44,6 +78,141 @@ void framebufferResizeCallback(GLFWwindow* window, int, int) {
   if (app) {
     app->renderer.markFramebufferResized();
   }
+}
+
+void rebuildCombinedMesh(AppState* app) {
+  app->mesh = StlMesh();
+  for (const auto& obj : app->sceneObjects) {
+    app->mesh.append(obj);
+  }
+  app->renderer.setMesh(app->mesh);
+}
+
+// Möller–Trumbore ray-triangle intersection.  Returns distance or -1.
+float rayTriangle(glm::vec3 origin, glm::vec3 dir, glm::vec3 v0, glm::vec3 v1, glm::vec3 v2) {
+  const glm::vec3 e1 = v1 - v0;
+  const glm::vec3 e2 = v2 - v0;
+  const glm::vec3 h = glm::cross(dir, e2);
+  const float a = glm::dot(e1, h);
+  if (std::abs(a) < 1e-8f) return -1.0f;
+  const float f = 1.0f / a;
+  const glm::vec3 s = origin - v0;
+  const float u = f * glm::dot(s, h);
+  if (u < 0.0f || u > 1.0f) return -1.0f;
+  const glm::vec3 q = glm::cross(s, e1);
+  const float v = f * glm::dot(dir, q);
+  if (v < 0.0f || u + v > 1.0f) return -1.0f;
+  const float t = f * glm::dot(e2, q);
+  return t > 1e-6f ? t : -1.0f;
+}
+
+// Pick scene object by ray.  Returns index or -1.
+int pickObject(const AppState& app, glm::vec3 rayO, glm::vec3 rayD) {
+  float bestT = std::numeric_limits<float>::max();
+  int bestIdx = -1;
+  for (int oi = 0; oi < static_cast<int>(app.sceneObjects.size()); ++oi) {
+    const auto& verts = app.sceneObjects[oi].vertices();
+    const auto& inds = app.sceneObjects[oi].indices();
+    for (size_t i = 0; i + 2 < inds.size(); i += 3) {
+      float t = rayTriangle(rayO, rayD, verts[inds[i]].position, verts[inds[i + 1]].position,
+                            verts[inds[i + 2]].position);
+      if (t > 0.0f && t < bestT) {
+        bestT = t;
+        bestIdx = oi;
+      }
+    }
+  }
+  return bestIdx;
+}
+
+void appendGrid(std::vector<ColorVertex>& lines, SketchPlane plane, float extent, float spacing) {
+  const glm::vec4 gridColor(0.25f, 0.25f, 0.25f, 1.0f);
+  const int count = static_cast<int>(extent / spacing);
+
+  for (int i = -count; i <= count; ++i) {
+    const float offset = static_cast<float>(i) * spacing;
+    glm::vec2 a1(offset, -extent);
+    glm::vec2 a2(offset, extent);
+    glm::vec2 b1(-extent, offset);
+    glm::vec2 b2(extent, offset);
+
+    lines.push_back({toWorld(a1, plane), gridColor});
+    lines.push_back({toWorld(a2, plane), gridColor});
+    lines.push_back({toWorld(b1, plane), gridColor});
+    lines.push_back({toWorld(b2, plane), gridColor});
+  }
+}
+
+void enterSketchMode(AppState* app, SketchPlane plane) {
+  app->sceneMode = SceneMode::Sketch;
+  app->activePlane = plane;
+  app->sketchTool.setTool(Tool::None);
+
+  // Snap camera to face the chosen plane.
+  switch (plane) {
+    case SketchPlane::XY: app->camera.snap(CameraController::Orientation::Front); break;
+    case SketchPlane::XZ: app->camera.snap(CameraController::Orientation::Top);   break;
+    case SketchPlane::YZ: app->camera.snap(CameraController::Orientation::Right); break;
+  }
+}
+
+void exitSketchMode(AppState* app) {
+  app->sceneMode = SceneMode::View3D;
+  app->sketchTool.cancel();
+  app->sketchTool.setTool(Tool::None);
+  app->extrudeTool.cancel();
+  app->activeSketch().clearSelection();
+}
+
+void drawMenuBar(AppState* app) {
+  if (!ImGui::BeginMainMenuBar()) return;
+
+  if (ImGui::BeginMenu("File")) {
+    if (ImGui::MenuItem("New Scene")) {
+      app->mesh = StlMesh();
+      app->sceneObjects.clear();
+      app->selectedObject = -1;
+      app->renderer.setMesh(app->mesh);
+      exitSketchMode(app);
+      for (auto& s : app->sketches) { s.clear(); }
+      app->extrudeTool.cancel();
+      app->status = "New scene";
+    }
+    if (ImGui::MenuItem("Open STL...")) {
+      if (!app->loadingMesh && !app->fileBrowser.isVisible()) {
+        app->fileBrowser.show({{"STL Files", {".stl"}}}, {}, "Open File", "Open");
+      }
+    }
+    if (ImGui::MenuItem("Export STL...", nullptr, false, app->selectedObject >= 0)) {
+      if (!app->exportBrowser.isVisible()) {
+        app->exportBrowser.show({{"STL Files", {".stl"}}}, {}, "Export STL", "Export");
+      }
+    }
+    ImGui::EndMenu();
+  }
+
+  if (ImGui::BeginMenu("Sketch")) {
+    if (ImGui::MenuItem("XY Plane")) enterSketchMode(app, SketchPlane::XY);
+    if (ImGui::MenuItem("XZ Plane")) enterSketchMode(app, SketchPlane::XZ);
+    if (ImGui::MenuItem("YZ Plane")) enterSketchMode(app, SketchPlane::YZ);
+    ImGui::Separator();
+    if (ImGui::MenuItem("Exit Sketch", nullptr, false, app->sceneMode == SceneMode::Sketch)) {
+      exitSketchMode(app);
+    }
+    ImGui::EndMenu();
+  }
+
+  if (ImGui::BeginMenu("Settings")) {
+    const char* unitLabels[] = {"Millimeters", "Centimeters", "Meters", "Inches", "Feet"};
+    for (int i = 0; i < 5; ++i) {
+      if (ImGui::MenuItem(unitLabels[i], nullptr, static_cast<int>(app->project.defaultUnit) == i)) {
+        app->project.defaultUnit = static_cast<Unit>(i);
+      }
+    }
+    ImGui::EndMenu();
+  }
+
+  ImGui::EndMainMenuBar();
 }
 
 void drawPanel(AppState* app) {
@@ -141,8 +310,8 @@ int main() {
     return 1;
   }
 
-  app.mesh = StlMesh::makeUnitCube();
-  app.renderer.setMesh(app.mesh);
+  app.sceneObjects.push_back(StlMesh::makeUnitCube());
+  rebuildCombinedMesh(&app);
 
   while (!glfwWindowShouldClose(window)) {
     glfwPollEvents();
@@ -158,39 +327,279 @@ int main() {
       if (!result.success) {
         app.status = "Open failed: " + result.error;
       } else {
-        app.mesh = std::move(result.mesh);
-        app.renderer.setMesh(app.mesh);
+        app.sceneObjects.clear();
+        app.sceneObjects.push_back(std::move(result.mesh));
+        app.selectedObject = -1;
+        rebuildCombinedMesh(&app);
         app.status = "Loaded " + result.path;
       }
     }
 
     app.renderer.beginImGuiFrame();
 
-  // WantCaptureMouse is true when ImGui has focus (e.g. hovering a window,
-  // dragging a slider).  We skip scene input in that case so mouse events
-  // don't simultaneously rotate the camera and interact with UI.
-  const ImGuiIO& io = ImGui::GetIO();
-  if (!io.WantCaptureMouse) {
+    // --- Menu bar (always visible) ---
+    drawMenuBar(&app);
+
+    // --- Toolbar (sketch mode only) ---
+    ToolbarAction toolbarAction;
+    if (app.sceneMode == SceneMode::Sketch) {
+      toolbarAction =
+          app.toolbar.draw(app.sketchTool, app.extrudeTool,
+                           app.activeSketch().hasSelection(), app.project.defaultUnit);
+    }
+
+    // Handle "Extrude" button press: gather profiles from selection.
+    if (toolbarAction.extrudeRequested && !app.extrudeTool.active()) {
+      const auto& sketch = app.activeSketch();
+      const auto sel = sketch.selectedIndices();
+
+      std::vector<std::vector<glm::vec2>> polylines;
+      for (size_t idx : sel) {
+        polylines.push_back(profile::tessellate2D(sketch.primitives()[idx]));
+      }
+
+      auto profiles = profile::chainProfiles(polylines);
+      if (!profiles.empty()) {
+        app.extrudeTool.begin(std::move(profiles), app.activePlane);
+        // Switch to isometric so the user can see the extrusion in 3D.
+        app.camera.snap(CameraController::Orientation::Isometric);
+        app.status = "Drag or type distance, then Confirm";
+      } else {
+        app.status = "Selection does not form a closed profile";
+      }
+    }
+
+    // Handle extrude confirm.
+    if (toolbarAction.extrudeConfirmed && app.extrudeTool.active()) {
+      StlMesh extruded = app.extrudeTool.confirm();
+      if (!extruded.empty()) {
+        app.sceneObjects.push_back(std::move(extruded));
+        app.selectedObject = static_cast<int>(app.sceneObjects.size()) - 1;
+        rebuildCombinedMesh(&app);
+        app.status = "Extruded (click to select, File > Export STL to save)";
+      }
+    }
+
+    // WantCaptureMouse is true when ImGui has focus (e.g. hovering a window,
+    // dragging a slider).  We skip scene input in that case so mouse events
+    // don't simultaneously rotate the camera and interact with UI.
+    const ImGuiIO& io = ImGui::GetIO();
+    if (!io.WantCaptureMouse) {
       double x = 0.0;
       double y = 0.0;
       glfwGetCursorPos(window, &x, &y);
       const bool leftDown = glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_LEFT) == GLFW_PRESS;
+      const bool ctrlHeld = (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
+                             glfwGetKey(window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS);
 
-      if (leftDown && !app.dragging) {
-        app.dragging = true;
-        app.camera.beginRotate(x, y);
-      } else if (leftDown && app.dragging) {
-        app.camera.rotateTo(x, y);
-      } else if (!leftDown && app.dragging) {
-        app.dragging = false;
-        app.camera.endRotate();
+      if (app.extrudeTool.active()) {
+        // --- Extrude mode: mouse controls extrusion distance ---
+        int fbW = 0, fbH = 0;
+        glfwGetFramebufferSize(window, &fbW, &fbH);
+        const glm::mat4 view = app.camera.viewMatrix();
+        const glm::mat4 proj = app.camera.projectionMatrix(app.renderer.framebufferAspect());
+
+        // Unproject near point as ray origin, far-near as direction.
+        const float ndcX = (2.0f * static_cast<float>(x) / static_cast<float>(fbW)) - 1.0f;
+        const float ndcY = (2.0f * static_cast<float>(y) / static_cast<float>(fbH)) - 1.0f;
+        const glm::mat4 invVP = glm::inverse(proj * view);
+        glm::vec4 nearW = invVP * glm::vec4(ndcX, ndcY, 0.0f, 1.0f);
+        glm::vec4 farW = invVP * glm::vec4(ndcX, ndcY, 1.0f, 1.0f);
+        nearW /= nearW.w;
+        farW /= farW.w;
+        const glm::vec3 rayO(nearW);
+        const glm::vec3 rayD = glm::normalize(glm::vec3(farW - nearW));
+
+        if (leftDown && !app.wasLeftDown) {
+          app.extrudeTool.mouseDown(rayO, rayD);
+        } else if (leftDown) {
+          app.extrudeTool.mouseMove(rayO, rayD);
+        } else if (!leftDown && app.wasLeftDown) {
+          app.extrudeTool.mouseUp();
+        }
+
+      } else if (app.sceneMode == SceneMode::Sketch &&
+                 app.sketchTool.activeTool() != Tool::None) {
+        // --- Drawing mode: feed mouse to SketchTool ---
+        int fbW = 0, fbH = 0;
+        glfwGetFramebufferSize(window, &fbW, &fbH);
+        const glm::mat4 view = app.camera.viewMatrix();
+        const glm::mat4 proj = app.camera.projectionMatrix(app.renderer.framebufferAspect());
+
+        auto hit = rayPlaneHit(static_cast<float>(x), static_cast<float>(y),
+                               static_cast<float>(fbW), static_cast<float>(fbH),
+                               view, proj, app.activePlane);
+        if (hit) {
+          glm::vec2 planePos = toPlane(*hit, app.activePlane);
+          app.sketchTool.mouseMove(planePos);
+
+          if (leftDown && !app.wasLeftDown) {
+            app.sketchTool.mouseClick(planePos);
+          }
+        }
+
+      } else if (app.sceneMode == SceneMode::Sketch &&
+                 app.sketchTool.activeTool() == Tool::None) {
+        // --- Selection mode: click, ctrl-click, or drag-select ---
+        int fbW = 0, fbH = 0;
+        glfwGetFramebufferSize(window, &fbW, &fbH);
+        const glm::mat4 view = app.camera.viewMatrix();
+        const glm::mat4 proj = app.camera.projectionMatrix(app.renderer.framebufferAspect());
+
+        if (leftDown && !app.wasLeftDown) {
+          // Mouse down: record start position for potential drag.
+          app.dragStartScreen = {static_cast<float>(x), static_cast<float>(y)};
+          app.dragCurScreen = app.dragStartScreen;
+          app.dragSelecting = false;
+        } else if (leftDown && app.wasLeftDown) {
+          // Mouse held: check if we've moved enough to start a drag-select.
+          app.dragCurScreen = {static_cast<float>(x), static_cast<float>(y)};
+          const glm::vec2 delta = app.dragCurScreen - app.dragStartScreen;
+          if (glm::dot(delta, delta) > 9.0f) {  // 3-pixel threshold
+            app.dragSelecting = true;
+          }
+        } else if (!leftDown && app.wasLeftDown) {
+          if (app.dragSelecting) {
+            // Drag-select complete: convert screen rect to plane coords.
+            auto hitA = rayPlaneHit(app.dragStartScreen.x, app.dragStartScreen.y,
+                                    static_cast<float>(fbW), static_cast<float>(fbH),
+                                    view, proj, app.activePlane);
+            auto hitB = rayPlaneHit(app.dragCurScreen.x, app.dragCurScreen.y,
+                                    static_cast<float>(fbW), static_cast<float>(fbH),
+                                    view, proj, app.activePlane);
+            if (hitA && hitB) {
+              glm::vec2 pA = toPlane(*hitA, app.activePlane);
+              glm::vec2 pB = toPlane(*hitB, app.activePlane);
+              if (ctrlHeld) {
+                app.activeSketch().addToSelectInRect(pA, pB);
+              } else {
+                app.activeSketch().selectInRect(pA, pB);
+              }
+            }
+            app.dragSelecting = false;
+          } else {
+            // Single click: point-select with hit test.
+            auto hit = rayPlaneHit(static_cast<float>(x), static_cast<float>(y),
+                                   static_cast<float>(fbW), static_cast<float>(fbH),
+                                   view, proj, app.activePlane);
+            if (hit) {
+              glm::vec2 planePos = toPlane(*hit, app.activePlane);
+              auto idx = app.activeSketch().hitTest(planePos, 5.0f);
+              if (idx) {
+                if (ctrlHeld) {
+                  app.activeSketch().toggleSelect(*idx);
+                } else {
+                  app.activeSketch().select(*idx);
+                }
+              } else if (!ctrlHeld) {
+                app.activeSketch().clearSelection();
+              }
+            }
+          }
+        }
+
+      } else {
+        // --- 3D orbit camera + object picking ---
+        if (leftDown && !app.wasLeftDown) {
+          app.dragging = true;
+          app.camera.beginRotate(x, y);
+          app.dragStartScreen = {static_cast<float>(x), static_cast<float>(y)};
+        } else if (leftDown && app.dragging) {
+          app.camera.rotateTo(x, y);
+        } else if (!leftDown && app.dragging) {
+          app.dragging = false;
+          app.camera.endRotate();
+
+          // If mouse barely moved, treat as a click → pick object.
+          const glm::vec2 cur(static_cast<float>(x), static_cast<float>(y));
+          if (glm::dot(cur - app.dragStartScreen, cur - app.dragStartScreen) < 9.0f) {
+            int fbW = 0, fbH = 0;
+            glfwGetFramebufferSize(window, &fbW, &fbH);
+            const glm::mat4 view = app.camera.viewMatrix();
+            const glm::mat4 proj =
+                app.camera.projectionMatrix(app.renderer.framebufferAspect());
+            const float ndcX =
+                (2.0f * static_cast<float>(x) / static_cast<float>(fbW)) - 1.0f;
+            const float ndcY =
+                (2.0f * static_cast<float>(y) / static_cast<float>(fbH)) - 1.0f;
+            const glm::mat4 invVP = glm::inverse(proj * view);
+            glm::vec4 nearW = invVP * glm::vec4(ndcX, ndcY, 0.0f, 1.0f);
+            glm::vec4 farW = invVP * glm::vec4(ndcX, ndcY, 1.0f, 1.0f);
+            nearW /= nearW.w;
+            farW /= farW.w;
+            const glm::vec3 rayO(nearW);
+            const glm::vec3 rayD = glm::normalize(glm::vec3(farW - nearW));
+
+            int hit = pickObject(app, rayO, rayD);
+            app.selectedObject = hit;
+            if (hit >= 0) {
+              app.status = "Object selected (File > Export STL to save)";
+            } else {
+              app.status = "Ready";
+            }
+          }
+        }
       }
+
+      app.wasLeftDown = leftDown;
 
       const float wheel = io.MouseWheel;
       if (wheel != 0.0f) {
         app.camera.zoom(wheel);
       }
     }
+
+    // Escape key: cancel extrude, cancel active tool, or exit sketch mode.
+    if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
+      if (app.extrudeTool.active()) {
+        app.extrudeTool.cancel();
+        app.status = "Extrude cancelled";
+      } else if (app.sketchTool.activeTool() != Tool::None) {
+        app.sketchTool.cancel();
+      } else if (app.sceneMode == SceneMode::Sketch) {
+        exitSketchMode(&app);
+      }
+    }
+
+    // Consume completed sketch primitives.
+    if (auto prim = app.sketchTool.takeResult()) {
+      app.activeSketch().addPrimitive(std::move(*prim));
+    }
+
+    // --- Build line data every frame ---
+    std::vector<ColorVertex> allLines;
+    app.gizmo.appendLines(allLines);
+
+    if (app.sceneMode == SceneMode::Sketch) {
+      appendGrid(allLines, app.activePlane, 100.0f, 10.0f);
+      app.activeSketch().appendLines(allLines, app.activePlane);
+      app.sketchTool.appendPreview(allLines, app.activePlane);
+    }
+
+    // Extrude preview lines (visible from any view).
+    app.extrudeTool.appendPreview(allLines);
+
+    // Highlight selected 3D object with cyan wireframe overlay.
+    if (app.selectedObject >= 0 &&
+        app.selectedObject < static_cast<int>(app.sceneObjects.size())) {
+      const auto& obj = app.sceneObjects[app.selectedObject];
+      const auto& verts = obj.vertices();
+      const auto& inds = obj.indices();
+      const glm::vec4 hlColor(0.0f, 0.8f, 1.0f, 1.0f);
+      for (size_t i = 0; i + 2 < inds.size(); i += 3) {
+        const glm::vec3& a = verts[inds[i]].position;
+        const glm::vec3& b = verts[inds[i + 1]].position;
+        const glm::vec3& c = verts[inds[i + 2]].position;
+        allLines.push_back({a, hlColor});
+        allLines.push_back({b, hlColor});
+        allLines.push_back({b, hlColor});
+        allLines.push_back({c, hlColor});
+        allLines.push_back({c, hlColor});
+        allLines.push_back({a, hlColor});
+      }
+    }
+
+    app.renderer.setLines(allLines);
 
     drawPanel(&app);
 
@@ -217,6 +626,36 @@ int main() {
           });
         }
       }
+    }
+
+    // --- Export file browser ---
+    if (app.exportBrowser.isVisible()) {
+      if (app.exportBrowser.draw() && app.exportBrowser.confirmed()) {
+        if (app.selectedObject >= 0 &&
+            app.selectedObject < static_cast<int>(app.sceneObjects.size())) {
+          std::string path = app.exportBrowser.selectedPath().string();
+          // Ensure .stl extension.
+          if (path.size() < 4 ||
+              path.substr(path.size() - 4) != ".stl") {
+            path += ".stl";
+          }
+          std::string err;
+          if (app.sceneObjects[app.selectedObject].saveAsBinary(path, err)) {
+            app.status = "Exported " + path;
+          } else {
+            app.status = "Export failed: " + err;
+          }
+        }
+      }
+    }
+
+    // --- Rubber-band selection overlay ---
+    if (app.dragSelecting) {
+      ImDrawList* dl = ImGui::GetForegroundDrawList();
+      ImVec2 p1(app.dragStartScreen.x, app.dragStartScreen.y);
+      ImVec2 p2(app.dragCurScreen.x, app.dragCurScreen.y);
+      dl->AddRectFilled(p1, p2, IM_COL32(0, 120, 255, 40));
+      dl->AddRect(p1, p2, IM_COL32(0, 120, 255, 200), 0.0f, 0, 1.5f);
     }
 
     ImGui::Render();

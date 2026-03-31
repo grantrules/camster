@@ -13,6 +13,8 @@
 
 #ifdef __linux__
 #include <unistd.h>
+#elif defined(_WIN32)
+#include <windows.h>
 #endif
 
 #define GLFW_INCLUDE_VULKAN
@@ -23,6 +25,7 @@
 #include <backends/imgui_impl_vulkan.h>
 
 #include "StlMesh.hpp"
+#include "ColorVertex.hpp"
 
 namespace {
 // Device extensions required by this renderer. Keep this list minimal and
@@ -128,12 +131,41 @@ std::array<VkVertexInputAttributeDescription, 2> vertexAttributes() {
   return attrs;
 }
 
+VkVertexInputBindingDescription colorVertexBinding() {
+  VkVertexInputBindingDescription desc{};
+  desc.binding = 0;
+  desc.stride = sizeof(ColorVertex);
+  desc.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+  return desc;
+}
+
+std::array<VkVertexInputAttributeDescription, 2> colorVertexAttributes() {
+  std::array<VkVertexInputAttributeDescription, 2> attrs{};
+  attrs[0].binding = 0;
+  attrs[0].location = 0;
+  attrs[0].format = VK_FORMAT_R32G32B32_SFLOAT;
+  attrs[0].offset = offsetof(ColorVertex, position);
+
+  attrs[1].binding = 0;
+  attrs[1].location = 1;
+  attrs[1].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+  attrs[1].offset = offsetof(ColorVertex, color);
+  return attrs;
+}
+
 std::filesystem::path executableDir() {
 #ifdef __linux__
   std::array<char, 4096> buffer{};
   const ssize_t len = readlink("/proc/self/exe", buffer.data(), buffer.size() - 1);
   if (len > 0) {
     buffer[static_cast<size_t>(len)] = '\0';
+    return std::filesystem::path(buffer.data()).parent_path();
+  }
+#elif defined(_WIN32)
+  std::array<wchar_t, 4096> buffer{};
+  const DWORD len = GetModuleFileNameW(nullptr, buffer.data(),
+                                       static_cast<DWORD>(buffer.size()));
+  if (len > 0 && len < buffer.size()) {
     return std::filesystem::path(buffer.data()).parent_path();
   }
 #endif
@@ -193,7 +225,8 @@ bool VulkanRenderer::initialize(GLFWwindow* window, std::string& error) {
       !pickPhysicalDevice(error) ||
       !createLogicalDevice(error) || !createSwapchain(error) || !createImageViews(error) ||
       !createRenderPass(error) || !createDescriptorSetLayout(error) ||
-      !createGraphicsPipeline(error) || !createCommandPool(error) || !createDepthResources(error) ||
+      !createGraphicsPipeline(error) || !createLinePipeline(error) ||
+      !createCommandPool(error) || !createDepthResources(error) ||
       !createFramebuffers(error) || !createUniformBuffers(error) || !createDescriptorPool(error) ||
       !createDescriptorSets(error) || !createCommandBuffers(error) || !createSyncObjects(error) ||
       !initImGui(error)) {
@@ -227,6 +260,7 @@ void VulkanRenderer::cleanup() {
 
   destroyBuffer(vertexBuffer_);
   destroyBuffer(indexBuffer_);
+  destroyBuffer(lineVertexBuffer_);
 
   for (auto& ub : uniformBuffers_) {
     destroyBuffer(ub);
@@ -390,6 +424,11 @@ bool VulkanRenderer::setupDebugMessenger(std::string& error) {
 void VulkanRenderer::setMesh(const StlMesh& mesh) {
   std::string ignored;
   uploadMeshBuffers(mesh, ignored);
+}
+
+void VulkanRenderer::setLines(const std::vector<ColorVertex>& lines) {
+  std::string ignored;
+  uploadLineBuffers(lines, ignored);
 }
 
 bool VulkanRenderer::drawFrame(const glm::mat4& view, const glm::mat4& projection,
@@ -1017,6 +1056,154 @@ bool VulkanRenderer::createGraphicsPipeline(std::string& error) {
   return true;
 }
 
+bool VulkanRenderer::createLinePipeline(std::string& error) {
+  std::string shaderProbe;
+  const std::filesystem::path shaderDir = findShaderDir(&shaderProbe);
+  if (shaderDir.empty()) {
+    error = "Could not locate shader directory for line shaders.";
+    return false;
+  }
+
+  const auto vertCode = readBinaryFile((shaderDir / "line.vert.spv").string(), error);
+  if (vertCode.empty()) return false;
+  const auto fragCode = readBinaryFile((shaderDir / "line.frag.spv").string(), error);
+  if (fragCode.empty()) return false;
+
+  VkShaderModule vert = createShaderModule(vertCode, error);
+  if (!vert) return false;
+  VkShaderModule frag = createShaderModule(fragCode, error);
+  if (!frag) { vkDestroyShaderModule(device_, vert, nullptr); return false; }
+
+  VkPipelineShaderStageCreateInfo vertStage{};
+  vertStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  vertStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
+  vertStage.module = vert;
+  vertStage.pName = "main";
+
+  VkPipelineShaderStageCreateInfo fragStage{};
+  fragStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+  fragStage.stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+  fragStage.module = frag;
+  fragStage.pName = "main";
+
+  VkPipelineShaderStageCreateInfo stages[] = {vertStage, fragStage};
+
+  const VkVertexInputBindingDescription binding = colorVertexBinding();
+  const auto attrs = colorVertexAttributes();
+
+  VkPipelineVertexInputStateCreateInfo vertexInput{};
+  vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+  vertexInput.vertexBindingDescriptionCount = 1;
+  vertexInput.pVertexBindingDescriptions = &binding;
+  vertexInput.vertexAttributeDescriptionCount = static_cast<uint32_t>(attrs.size());
+  vertexInput.pVertexAttributeDescriptions = attrs.data();
+
+  VkPipelineInputAssemblyStateCreateInfo assembly{};
+  assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+  assembly.topology = VK_PRIMITIVE_TOPOLOGY_LINE_LIST;
+
+  VkViewport viewport{};
+  viewport.width = static_cast<float>(swapchainExtent_.width);
+  viewport.height = static_cast<float>(swapchainExtent_.height);
+  viewport.maxDepth = 1.0f;
+
+  VkRect2D scissor{};
+  scissor.extent = swapchainExtent_;
+
+  VkPipelineViewportStateCreateInfo viewportState{};
+  viewportState.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+  viewportState.viewportCount = 1;
+  viewportState.pViewports = &viewport;
+  viewportState.scissorCount = 1;
+  viewportState.pScissors = &scissor;
+
+  VkPipelineRasterizationStateCreateInfo raster{};
+  raster.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+  raster.polygonMode = VK_POLYGON_MODE_FILL;
+  raster.cullMode = VK_CULL_MODE_NONE;
+  raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+  raster.lineWidth = 1.0f;
+
+  VkPipelineMultisampleStateCreateInfo multisample{};
+  multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+  multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+  VkPipelineDepthStencilStateCreateInfo depthStencil{};
+  depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+  depthStencil.depthTestEnable = VK_TRUE;
+  depthStencil.depthWriteEnable = VK_TRUE;
+  depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+
+  VkPipelineColorBlendAttachmentState colorBlendAttachment{};
+  colorBlendAttachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                        VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+  VkPipelineColorBlendStateCreateInfo colorBlend{};
+  colorBlend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+  colorBlend.attachmentCount = 1;
+  colorBlend.pAttachments = &colorBlendAttachment;
+
+  VkGraphicsPipelineCreateInfo pipelineInfo{};
+  pipelineInfo.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+  pipelineInfo.stageCount = 2;
+  pipelineInfo.pStages = stages;
+  pipelineInfo.pVertexInputState = &vertexInput;
+  pipelineInfo.pInputAssemblyState = &assembly;
+  pipelineInfo.pViewportState = &viewportState;
+  pipelineInfo.pRasterizationState = &raster;
+  pipelineInfo.pMultisampleState = &multisample;
+  pipelineInfo.pDepthStencilState = &depthStencil;
+  pipelineInfo.pColorBlendState = &colorBlend;
+  pipelineInfo.layout = pipelineLayout_;
+  pipelineInfo.renderPass = renderPass_;
+  pipelineInfo.subpass = 0;
+
+  if (vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr,
+                                &linePipeline_) != VK_SUCCESS) {
+    error = "vkCreateGraphicsPipelines (line) failed.";
+    vkDestroyShaderModule(device_, vert, nullptr);
+    vkDestroyShaderModule(device_, frag, nullptr);
+    return false;
+  }
+
+  vkDestroyShaderModule(device_, vert, nullptr);
+  vkDestroyShaderModule(device_, frag, nullptr);
+  return true;
+}
+
+bool VulkanRenderer::uploadLineBuffers(const std::vector<ColorVertex>& lines, std::string& error) {
+  destroyBuffer(lineVertexBuffer_);
+  lineVertexCount_ = static_cast<uint32_t>(lines.size());
+  if (lines.empty()) return true;
+
+  const VkDeviceSize bufferSize = sizeof(ColorVertex) * lines.size();
+
+  Buffer staging;
+  if (!createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                    staging, error)) {
+    return false;
+  }
+
+  void* mapped = nullptr;
+  vkMapMemory(device_, staging.memory, 0, bufferSize, 0, &mapped);
+  std::memcpy(mapped, lines.data(), static_cast<size_t>(bufferSize));
+  vkUnmapMemory(device_, staging.memory);
+
+  if (!createBuffer(bufferSize, VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, lineVertexBuffer_, error)) {
+    destroyBuffer(staging);
+    return false;
+  }
+
+  if (!copyBuffer(staging.buffer, lineVertexBuffer_.buffer, bufferSize, error)) {
+    destroyBuffer(staging);
+    return false;
+  }
+  destroyBuffer(staging);
+  return true;
+}
+
 bool VulkanRenderer::createDepthResources(std::string& error) {
   if (!createImage(swapchainExtent_, depthFormat_, VK_IMAGE_TILING_OPTIMAL,
                    VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
@@ -1583,6 +1770,20 @@ bool VulkanRenderer::recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageInde
     vkCmdDrawIndexed(cmd, indexCount_, 1, 0, 0, 0);
   }
 
+  // Draw colored lines (gizmo, grid, sketch geometry).
+  if (lineVertexCount_ > 0 && linePipeline_ != VK_NULL_HANDLE && lineVertexBuffer_.buffer != VK_NULL_HANDLE) {
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, linePipeline_);
+
+    VkBuffer lineBuffers[] = {lineVertexBuffer_.buffer};
+    VkDeviceSize lineOffsets[] = {0};
+    vkCmdBindVertexBuffers(cmd, 0, 1, lineBuffers, lineOffsets);
+
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 1,
+                            &descriptorSets_[currentFrame_], 0, nullptr);
+
+    vkCmdDraw(cmd, lineVertexCount_, 1, 0, 0);
+  }
+
   ImGui_ImplVulkan_RenderDrawData(drawData, cmd);
 
   vkCmdEndRenderPass(cmd);
@@ -1676,6 +1877,11 @@ void VulkanRenderer::cleanupSwapchain() {
     wireframePipeline_ = VK_NULL_HANDLE;
   }
 
+  if (linePipeline_) {
+    vkDestroyPipeline(device_, linePipeline_, nullptr);
+    linePipeline_ = VK_NULL_HANDLE;
+  }
+
   if (pipelineLayout_) {
     vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr);
     pipelineLayout_ = VK_NULL_HANDLE;
@@ -1719,7 +1925,8 @@ bool VulkanRenderer::recreateSwapchain(std::string& error) {
   // so they survive swapchain recreation unchanged.
 
   if (!createSwapchain(error) || !createImageViews(error) || !createRenderPass(error) ||
-      !createGraphicsPipeline(error) || !createDepthResources(error) || !createFramebuffers(error)) {
+      !createGraphicsPipeline(error) || !createLinePipeline(error) ||
+      !createDepthResources(error) || !createFramebuffers(error)) {
     return false;
   }
 

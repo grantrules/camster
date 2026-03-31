@@ -9,6 +9,8 @@
 #include <glm/vec4.hpp>
 #include <vulkan/vulkan.h>
 
+#include "ColorVertex.hpp"
+
 struct GLFWwindow;
 struct ImDrawData;
 class StlMesh;
@@ -43,6 +45,7 @@ class VulkanRenderer {
   void waitIdle();
 
   void setMesh(const StlMesh& mesh);
+  void setLines(const std::vector<ColorVertex>& lines);
   void markFramebufferResized();
   void toggleWireframe();
   void toggleNormalVisualization();
@@ -106,6 +109,7 @@ class VulkanRenderer {
   bool createRenderPass(std::string& error);
   bool createDescriptorSetLayout(std::string& error);
   bool createGraphicsPipeline(std::string& error);
+  bool createLinePipeline(std::string& error);
   bool createDepthResources(std::string& error);
   bool createFramebuffers(std::string& error);
   bool createCommandPool(std::string& error);
@@ -136,6 +140,7 @@ class VulkanRenderer {
   bool hasStencilComponent(VkFormat format) const;
 
   bool uploadMeshBuffers(const StlMesh& mesh, std::string& error);
+  bool uploadLineBuffers(const std::vector<ColorVertex>& lines, std::string& error);
   bool updateUniformBuffer(uint32_t frameIndex, const glm::mat4& view, const glm::mat4& projection,
                            std::string& error);
   bool recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex, ImDrawData* drawData,
@@ -179,6 +184,7 @@ class VulkanRenderer {
   VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
   VkPipeline fillPipeline_ = VK_NULL_HANDLE;
   VkPipeline wireframePipeline_ = VK_NULL_HANDLE;
+  VkPipeline linePipeline_ = VK_NULL_HANDLE;
 
   std::vector<Buffer> uniformBuffers_;
   VkDescriptorPool descriptorPool_ = VK_NULL_HANDLE;
@@ -187,6 +193,9 @@ class VulkanRenderer {
   Buffer vertexBuffer_;
   Buffer indexBuffer_;
   uint32_t indexCount_ = 0;
+
+  Buffer lineVertexBuffer_;
+  uint32_t lineVertexCount_ = 0;
 
   VkCommandPool commandPool_ = VK_NULL_HANDLE;
   std::vector<VkCommandBuffer> commandBuffers_;

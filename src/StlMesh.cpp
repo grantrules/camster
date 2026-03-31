@@ -197,6 +197,21 @@ StlMesh StlMesh::makeUnitCube() {
   return mesh;
 }
 
+StlMesh StlMesh::fromGeometry(std::vector<StlVertex> verts, std::vector<uint32_t> inds) {
+  StlMesh mesh;
+  mesh.vertices_ = std::move(verts);
+  mesh.indices_ = std::move(inds);
+  return mesh;
+}
+
+void StlMesh::append(const StlMesh& other) {
+  const auto base = static_cast<uint32_t>(vertices_.size());
+  vertices_.insert(vertices_.end(), other.vertices_.begin(), other.vertices_.end());
+  for (uint32_t idx : other.indices_) {
+    indices_.push_back(base + idx);
+  }
+}
+
 bool StlMesh::loadAscii(const std::string& text, std::string& error) {
   std::istringstream iss(text);
   std::string line;

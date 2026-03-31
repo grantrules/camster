@@ -25,6 +25,8 @@ class StlMesh {
   const std::vector<uint32_t>& indices() const;
 
   static StlMesh makeUnitCube();
+  static StlMesh fromGeometry(std::vector<StlVertex> verts, std::vector<uint32_t> inds);
+  void append(const StlMesh& other);
 
  private:
   bool loadAscii(const std::string& text, std::string& error);
