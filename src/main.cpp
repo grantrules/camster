@@ -170,8 +170,12 @@ struct AppState {
   int nextObjectNumber = 1;
   std::vector<int> browserSelectedObjects;
   std::vector<int> browserSelectedSketches;
+  int objectSelectionAnchor = -1;
+  int sketchSelectionAnchor = -1;
   int renameObjectIndex = -1;
   int renameSketchIndex = -1;
+  std::array<char, 64> renameBuffer{};
+  bool focusRenameInput = false;
   BrowserSection browserFocusSection = BrowserSection::Objects;
   std::vector<int> pendingDeleteObjects;
   bool openDeleteObjectsPopup = false;
@@ -241,6 +245,21 @@ void syncSelectedObjectFromBrowser(AppState* app) {
   }
 }
 
+void syncSelectedSketchFromBrowser(AppState* app) {
+  sanitizeObjectIndices(app->browserSelectedSketches, static_cast<int>(app->sketchMeta.size()));
+  if (app->browserSelectedSketches.empty()) {
+    app->renameSketchIndex = -1;
+    return;
+  }
+  if (app->browserSelectedSketches.size() == 1) {
+    app->activePlane = static_cast<SketchPlane>(app->browserSelectedSketches.front());
+  }
+  if (app->browserSelectedSketches.size() != 1 ||
+      !hasIndex(app->browserSelectedSketches, app->renameSketchIndex)) {
+    app->renameSketchIndex = -1;
+  }
+}
+
 void initializeSketchMetadata(AppState* app) {
   setName(app->sketchMeta[0].name, "Sketch 1");
   setName(app->sketchMeta[1].name, "Sketch 2");
@@ -265,9 +284,58 @@ void clearSceneObjects(AppState* app) {
   app->sceneObjectMeta.clear();
   app->browserSelectedObjects.clear();
   app->pendingDeleteObjects.clear();
+  app->objectSelectionAnchor = -1;
   app->selectedObject = -1;
   app->nextObjectNumber = 1;
   app->renameObjectIndex = -1;
+  app->renameSketchIndex = -1;
+}
+
+void setSelectionRange(std::vector<int>& selection, int start, int end) {
+  selection.clear();
+  if (start > end) std::swap(start, end);
+  for (int i = start; i <= end; ++i) selection.push_back(i);
+}
+
+void beginObjectRename(AppState* app, int idx) {
+  if (idx < 0 || idx >= static_cast<int>(app->sceneObjectMeta.size())) return;
+  app->renameObjectIndex = idx;
+  app->renameSketchIndex = -1;
+  setName(app->renameBuffer, app->sceneObjectMeta[idx].name.data());
+  app->focusRenameInput = true;
+}
+
+void beginSketchRename(AppState* app, int idx) {
+  if (idx < 0 || idx >= static_cast<int>(app->sketchMeta.size())) return;
+  app->renameSketchIndex = idx;
+  app->renameObjectIndex = -1;
+  setName(app->renameBuffer, app->sketchMeta[idx].name.data());
+  app->focusRenameInput = true;
+}
+
+void commitObjectRename(AppState* app) {
+  if (app->renameObjectIndex < 0 ||
+      app->renameObjectIndex >= static_cast<int>(app->sceneObjectMeta.size())) {
+    app->renameObjectIndex = -1;
+    return;
+  }
+  setName(app->sceneObjectMeta[app->renameObjectIndex].name, app->renameBuffer.data());
+  app->renameObjectIndex = -1;
+}
+
+void commitSketchRename(AppState* app) {
+  if (app->renameSketchIndex < 0 ||
+      app->renameSketchIndex >= static_cast<int>(app->sketchMeta.size())) {
+    app->renameSketchIndex = -1;
+    return;
+  }
+  setName(app->sketchMeta[app->renameSketchIndex].name, app->renameBuffer.data());
+  app->renameSketchIndex = -1;
+}
+
+void cancelBrowserRename(AppState* app) {
+  app->renameObjectIndex = -1;
+  app->renameSketchIndex = -1;
 }
 
 void stepSelection(std::vector<int>& selection, int count, int delta) {
@@ -308,6 +376,7 @@ void deleteSceneObjects(AppState* app, const std::vector<int>& rawIndices) {
   app->sceneObjectMeta = std::move(nextMeta);
   app->pendingDeleteObjects.clear();
   app->renameObjectIndex = -1;
+  app->objectSelectionAnchor = -1;
   sanitizeObjectIndices(app->extrudeOptions.targets, static_cast<int>(app->sceneObjects.size()));
   sanitizeObjectIndices(app->combineOptions.targets, static_cast<int>(app->sceneObjects.size()));
   sanitizeObjectIndices(app->combineOptions.tools, static_cast<int>(app->sceneObjects.size()));
@@ -704,6 +773,8 @@ void drawMenuBar(AppState* app) {
       for (auto& s : app->sketches) { s.clear(); }
       initializeSketchMetadata(app);
       app->browserSelectedSketches.clear();
+      app->sketchSelectionAnchor = -1;
+      app->renameSketchIndex = -1;
       app->extrudeTool.cancel();
       app->project.initFromAppSettings(app->appSettings);
       app->status = "New scene";
@@ -949,12 +1020,21 @@ void drawObjectBrowserWindow(AppState* app) {
 
         ImGui::TableSetColumnIndex(2);
         if (renameInline) {
+          if (app->focusRenameInput) {
+            ImGui::SetKeyboardFocusHere();
+            app->focusRenameInput = false;
+          }
           ImGui::SetNextItemWidth(-1.0f);
           const bool accepted = ImGui::InputText(
-              "##objname", meta.name.data(), meta.name.size(),
+              "##objname", app->renameBuffer.data(), app->renameBuffer.size(),
               ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_EnterReturnsTrue);
-          if (ImGui::IsItemDeactivated() || accepted) {
-            app->renameObjectIndex = -1;
+          const bool cancel = ImGui::IsItemActive() && ImGui::IsKeyPressed(ImGuiKey_Escape);
+          if (cancel) {
+            cancelBrowserRename(app);
+          } else if (accepted) {
+            commitObjectRename(app);
+          } else if (ImGui::IsItemDeactivated()) {
+            commitObjectRename(app);
           }
         } else {
           std::string label = meta.name.data();
@@ -966,14 +1046,16 @@ void drawObjectBrowserWindow(AppState* app) {
           if (ImGui::Selectable(label.c_str(), selected,
                                 ImGuiSelectableFlags_SpanAllColumns)) {
             setSingleOrMultiSelection(app->browserSelectedObjects, i, multiSelect);
+            app->objectSelectionAnchor = i;
             syncSelectedObjectFromBrowser(app);
             app->renameObjectIndex = -1;
             app->browserFocusSection = BrowserSection::Objects;
           }
           if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
             app->browserSelectedObjects.assign(1, i);
+            app->objectSelectionAnchor = i;
             syncSelectedObjectFromBrowser(app);
-            app->renameObjectIndex = i;
+            beginObjectRename(app, i);
             app->browserFocusSection = BrowserSection::Objects;
           }
         }
@@ -1020,12 +1102,21 @@ void drawObjectBrowserWindow(AppState* app) {
 
         ImGui::TableSetColumnIndex(2);
         if (renameInline) {
+          if (app->focusRenameInput) {
+            ImGui::SetKeyboardFocusHere();
+            app->focusRenameInput = false;
+          }
           ImGui::SetNextItemWidth(-1.0f);
           const bool accepted = ImGui::InputText(
-              "##skname", meta.name.data(), meta.name.size(),
+              "##skname", app->renameBuffer.data(), app->renameBuffer.size(),
               ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_EnterReturnsTrue);
-          if (ImGui::IsItemDeactivated() || accepted) {
-            app->renameSketchIndex = -1;
+          const bool cancel = ImGui::IsItemActive() && ImGui::IsKeyPressed(ImGuiKey_Escape);
+          if (cancel) {
+            cancelBrowserRename(app);
+          } else if (accepted) {
+            commitSketchRename(app);
+          } else if (ImGui::IsItemDeactivated()) {
+            commitSketchRename(app);
           }
         } else {
           std::string label = meta.name.data();
@@ -1037,16 +1128,16 @@ void drawObjectBrowserWindow(AppState* app) {
           if (ImGui::Selectable(label.c_str(), selected,
                                 ImGuiSelectableFlags_SpanAllColumns)) {
             setSingleOrMultiSelection(app->browserSelectedSketches, i, multiSelect);
-            if (app->browserSelectedSketches.size() == 1) {
-              app->activePlane = static_cast<SketchPlane>(app->browserSelectedSketches[0]);
-            }
+            app->sketchSelectionAnchor = i;
+            syncSelectedSketchFromBrowser(app);
             app->renameSketchIndex = -1;
             app->browserFocusSection = BrowserSection::Sketches;
           }
           if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
             app->browserSelectedSketches.assign(1, i);
-            app->activePlane = static_cast<SketchPlane>(i);
-            app->renameSketchIndex = i;
+            app->sketchSelectionAnchor = i;
+            syncSelectedSketchFromBrowser(app);
+            beginSketchRename(app, i);
             app->browserFocusSection = BrowserSection::Sketches;
           }
         }
@@ -1071,40 +1162,82 @@ void drawObjectBrowserWindow(AppState* app) {
     if (ImGui::IsKeyPressed(ImGuiKey_F2)) {
       if (app->browserFocusSection == BrowserSection::Objects &&
           app->browserSelectedObjects.size() == 1) {
-        app->renameObjectIndex = app->browserSelectedObjects.front();
-        app->renameSketchIndex = -1;
+        beginObjectRename(app, app->browserSelectedObjects.front());
       } else if (app->browserFocusSection == BrowserSection::Sketches &&
                  app->browserSelectedSketches.size() == 1) {
-        app->renameSketchIndex = app->browserSelectedSketches.front();
-        app->renameObjectIndex = -1;
+        beginSketchRename(app, app->browserSelectedSketches.front());
       }
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_UpArrow)) {
       if (app->browserFocusSection == BrowserSection::Objects) {
-        stepSelection(app->browserSelectedObjects, static_cast<int>(app->sceneObjects.size()), -1);
+        const int count = static_cast<int>(app->sceneObjects.size());
+        if (ImGui::GetIO().KeyShift && count > 0) {
+          int anchor = app->objectSelectionAnchor >= 0 ? app->objectSelectionAnchor :
+                       (app->browserSelectedObjects.empty() ? 0 : app->browserSelectedObjects.front());
+          int current = app->browserSelectedObjects.empty() ? anchor : app->browserSelectedObjects.front();
+          current = std::clamp(current - 1, 0, count - 1);
+          app->objectSelectionAnchor = anchor;
+          setSelectionRange(app->browserSelectedObjects, anchor, current);
+        } else {
+          stepSelection(app->browserSelectedObjects, count, -1);
+          if (!app->browserSelectedObjects.empty()) {
+            app->objectSelectionAnchor = app->browserSelectedObjects.front();
+          }
+        }
         syncSelectedObjectFromBrowser(app);
       } else {
-        stepSelection(app->browserSelectedSketches, 3, -1);
-        if (!app->browserSelectedSketches.empty()) {
-          app->activePlane = static_cast<SketchPlane>(app->browserSelectedSketches.front());
+        if (ImGui::GetIO().KeyShift) {
+          int anchor = app->sketchSelectionAnchor >= 0 ? app->sketchSelectionAnchor :
+                       (app->browserSelectedSketches.empty() ? 0 : app->browserSelectedSketches.front());
+          int current = app->browserSelectedSketches.empty() ? anchor : app->browserSelectedSketches.front();
+          current = std::clamp(current - 1, 0, 2);
+          app->sketchSelectionAnchor = anchor;
+          setSelectionRange(app->browserSelectedSketches, anchor, current);
+        } else {
+          stepSelection(app->browserSelectedSketches, 3, -1);
+          if (!app->browserSelectedSketches.empty()) {
+            app->sketchSelectionAnchor = app->browserSelectedSketches.front();
+          }
         }
+        syncSelectedSketchFromBrowser(app);
       }
-      app->renameObjectIndex = -1;
-      app->renameSketchIndex = -1;
+      cancelBrowserRename(app);
     }
     if (ImGui::IsKeyPressed(ImGuiKey_DownArrow)) {
       if (app->browserFocusSection == BrowserSection::Objects) {
-        stepSelection(app->browserSelectedObjects, static_cast<int>(app->sceneObjects.size()), 1);
+        const int count = static_cast<int>(app->sceneObjects.size());
+        if (ImGui::GetIO().KeyShift && count > 0) {
+          int anchor = app->objectSelectionAnchor >= 0 ? app->objectSelectionAnchor :
+                       (app->browserSelectedObjects.empty() ? 0 : app->browserSelectedObjects.front());
+          int current = app->browserSelectedObjects.empty() ? anchor : app->browserSelectedObjects.front();
+          current = std::clamp(current + 1, 0, count - 1);
+          app->objectSelectionAnchor = anchor;
+          setSelectionRange(app->browserSelectedObjects, anchor, current);
+        } else {
+          stepSelection(app->browserSelectedObjects, count, 1);
+          if (!app->browserSelectedObjects.empty()) {
+            app->objectSelectionAnchor = app->browserSelectedObjects.front();
+          }
+        }
         syncSelectedObjectFromBrowser(app);
       } else {
-        stepSelection(app->browserSelectedSketches, 3, 1);
-        if (!app->browserSelectedSketches.empty()) {
-          app->activePlane = static_cast<SketchPlane>(app->browserSelectedSketches.front());
+        if (ImGui::GetIO().KeyShift) {
+          int anchor = app->sketchSelectionAnchor >= 0 ? app->sketchSelectionAnchor :
+                       (app->browserSelectedSketches.empty() ? 0 : app->browserSelectedSketches.front());
+          int current = app->browserSelectedSketches.empty() ? anchor : app->browserSelectedSketches.front();
+          current = std::clamp(current + 1, 0, 2);
+          app->sketchSelectionAnchor = anchor;
+          setSelectionRange(app->browserSelectedSketches, anchor, current);
+        } else {
+          stepSelection(app->browserSelectedSketches, 3, 1);
+          if (!app->browserSelectedSketches.empty()) {
+            app->sketchSelectionAnchor = app->browserSelectedSketches.front();
+          }
         }
+        syncSelectedSketchFromBrowser(app);
       }
-      app->renameObjectIndex = -1;
-      app->renameSketchIndex = -1;
+      cancelBrowserRename(app);
     }
 
     if (ImGui::IsKeyPressed(ImGuiKey_Delete) &&
