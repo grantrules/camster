@@ -50,6 +50,11 @@ enum class ObjectPickMode {
   CombineTools,
 };
 
+enum class BrowserSection {
+  Objects,
+  Sketches,
+};
+
 struct ExtrudeOptionsState {
   bool visible = false;
   bool applyRequested = false;
@@ -167,6 +172,9 @@ struct AppState {
   std::vector<int> browserSelectedSketches;
   int renameObjectIndex = -1;
   int renameSketchIndex = -1;
+  BrowserSection browserFocusSection = BrowserSection::Objects;
+  std::vector<int> pendingDeleteObjects;
+  bool openDeleteObjectsPopup = false;
   ObjectPickMode objectPickMode = ObjectPickMode::None;
   ExtrudeOptionsState extrudeOptions;
   CombineOptionsState combineOptions;
@@ -217,6 +225,8 @@ const char* browserRowLabel(bool visible, bool locked) {
   return "";
 }
 
+void rebuildCombinedMesh(AppState* app);
+
 void syncSelectedObjectFromBrowser(AppState* app) {
   sanitizeObjectIndices(app->browserSelectedObjects, static_cast<int>(app->sceneObjects.size()));
   if (app->browserSelectedObjects.empty()) {
@@ -254,9 +264,59 @@ void clearSceneObjects(AppState* app) {
   app->sceneObjects.clear();
   app->sceneObjectMeta.clear();
   app->browserSelectedObjects.clear();
+  app->pendingDeleteObjects.clear();
   app->selectedObject = -1;
   app->nextObjectNumber = 1;
   app->renameObjectIndex = -1;
+}
+
+void stepSelection(std::vector<int>& selection, int count, int delta) {
+  if (count <= 0) {
+    selection.clear();
+    return;
+  }
+
+  int current = selection.empty() ? 0 : selection.front();
+  current = std::clamp(current + delta, 0, count - 1);
+  selection.assign(1, current);
+}
+
+void deleteSceneObjects(AppState* app, const std::vector<int>& rawIndices) {
+  std::vector<int> indices = rawIndices;
+  sanitizeObjectIndices(indices, static_cast<int>(app->sceneObjects.size()));
+  indices.erase(std::remove_if(indices.begin(), indices.end(), [app](int idx) {
+                  return idx >= static_cast<int>(app->sceneObjectMeta.size()) ||
+                         app->sceneObjectMeta[idx].locked;
+                }),
+                indices.end());
+  if (indices.empty()) return;
+
+  std::vector<bool> remove(app->sceneObjects.size(), false);
+  for (int idx : indices) remove[idx] = true;
+
+  std::vector<StlMesh> nextObjects;
+  std::vector<ObjectMetadata> nextMeta;
+  nextObjects.reserve(app->sceneObjects.size());
+  nextMeta.reserve(app->sceneObjectMeta.size());
+  for (int i = 0; i < static_cast<int>(app->sceneObjects.size()); ++i) {
+    if (remove[i]) continue;
+    nextObjects.push_back(std::move(app->sceneObjects[i]));
+    nextMeta.push_back(app->sceneObjectMeta[i]);
+  }
+
+  app->sceneObjects = std::move(nextObjects);
+  app->sceneObjectMeta = std::move(nextMeta);
+  app->pendingDeleteObjects.clear();
+  app->renameObjectIndex = -1;
+  sanitizeObjectIndices(app->extrudeOptions.targets, static_cast<int>(app->sceneObjects.size()));
+  sanitizeObjectIndices(app->combineOptions.targets, static_cast<int>(app->sceneObjects.size()));
+  sanitizeObjectIndices(app->combineOptions.tools, static_cast<int>(app->sceneObjects.size()));
+  app->browserSelectedObjects.clear();
+  if (!app->sceneObjects.empty()) {
+    app->browserSelectedObjects.assign(1, std::min(indices.front(), static_cast<int>(app->sceneObjects.size()) - 1));
+  }
+  syncSelectedObjectFromBrowser(app);
+  rebuildCombinedMesh(app);
 }
 
 void framebufferResizeCallback(GLFWwindow* window, int, int) {
@@ -841,6 +901,7 @@ void drawObjectBrowserWindow(AppState* app) {
   ImGui::Begin("Object Browser");
 
   const bool multiSelect = ImGui::GetIO().KeyCtrl;
+  const bool browserFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
   const auto tintRow = [](bool visible, bool locked) {
     if (!visible && locked) {
       return IM_COL32(90, 70, 40, 50);
@@ -907,11 +968,13 @@ void drawObjectBrowserWindow(AppState* app) {
             setSingleOrMultiSelection(app->browserSelectedObjects, i, multiSelect);
             syncSelectedObjectFromBrowser(app);
             app->renameObjectIndex = -1;
+            app->browserFocusSection = BrowserSection::Objects;
           }
           if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
             app->browserSelectedObjects.assign(1, i);
             syncSelectedObjectFromBrowser(app);
             app->renameObjectIndex = i;
+            app->browserFocusSection = BrowserSection::Objects;
           }
         }
 
@@ -978,11 +1041,13 @@ void drawObjectBrowserWindow(AppState* app) {
               app->activePlane = static_cast<SketchPlane>(app->browserSelectedSketches[0]);
             }
             app->renameSketchIndex = -1;
+            app->browserFocusSection = BrowserSection::Sketches;
           }
           if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
             app->browserSelectedSketches.assign(1, i);
             app->activePlane = static_cast<SketchPlane>(i);
             app->renameSketchIndex = i;
+            app->browserFocusSection = BrowserSection::Sketches;
           }
         }
 
@@ -1002,8 +1067,95 @@ void drawObjectBrowserWindow(AppState* app) {
     }
   }
 
+  if (browserFocused && !ImGui::IsAnyItemActive()) {
+    if (ImGui::IsKeyPressed(ImGuiKey_F2)) {
+      if (app->browserFocusSection == BrowserSection::Objects &&
+          app->browserSelectedObjects.size() == 1) {
+        app->renameObjectIndex = app->browserSelectedObjects.front();
+        app->renameSketchIndex = -1;
+      } else if (app->browserFocusSection == BrowserSection::Sketches &&
+                 app->browserSelectedSketches.size() == 1) {
+        app->renameSketchIndex = app->browserSelectedSketches.front();
+        app->renameObjectIndex = -1;
+      }
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_UpArrow)) {
+      if (app->browserFocusSection == BrowserSection::Objects) {
+        stepSelection(app->browserSelectedObjects, static_cast<int>(app->sceneObjects.size()), -1);
+        syncSelectedObjectFromBrowser(app);
+      } else {
+        stepSelection(app->browserSelectedSketches, 3, -1);
+        if (!app->browserSelectedSketches.empty()) {
+          app->activePlane = static_cast<SketchPlane>(app->browserSelectedSketches.front());
+        }
+      }
+      app->renameObjectIndex = -1;
+      app->renameSketchIndex = -1;
+    }
+    if (ImGui::IsKeyPressed(ImGuiKey_DownArrow)) {
+      if (app->browserFocusSection == BrowserSection::Objects) {
+        stepSelection(app->browserSelectedObjects, static_cast<int>(app->sceneObjects.size()), 1);
+        syncSelectedObjectFromBrowser(app);
+      } else {
+        stepSelection(app->browserSelectedSketches, 3, 1);
+        if (!app->browserSelectedSketches.empty()) {
+          app->activePlane = static_cast<SketchPlane>(app->browserSelectedSketches.front());
+        }
+      }
+      app->renameObjectIndex = -1;
+      app->renameSketchIndex = -1;
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_Delete) &&
+        app->browserFocusSection == BrowserSection::Objects &&
+        !app->browserSelectedObjects.empty()) {
+      app->pendingDeleteObjects = app->browserSelectedObjects;
+      app->openDeleteObjectsPopup = true;
+    }
+  }
+
+  if (app->openDeleteObjectsPopup) {
+    ImGui::OpenPopup("Delete Objects?");
+    app->openDeleteObjectsPopup = false;
+  }
+  if (ImGui::BeginPopupModal("Delete Objects?", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    std::vector<int> deletable = app->pendingDeleteObjects;
+    sanitizeObjectIndices(deletable, static_cast<int>(app->sceneObjects.size()));
+    deletable.erase(std::remove_if(deletable.begin(), deletable.end(), [app](int idx) {
+                    return idx >= static_cast<int>(app->sceneObjectMeta.size()) ||
+                           app->sceneObjectMeta[idx].locked;
+                  }),
+                  deletable.end());
+
+    if (deletable.empty()) {
+      ImGui::TextUnformatted("No unlocked selected objects can be deleted.");
+    } else {
+      ImGui::Text("Delete %d selected object(s)?", static_cast<int>(deletable.size()));
+      for (int idx : deletable) {
+        ImGui::BulletText("%s", app->sceneObjectMeta[idx].name.data());
+      }
+    }
+
+    ImGui::Spacing();
+    if (ImGui::Button("Delete", ImVec2(120.0f, 0.0f))) {
+      if (!deletable.empty()) {
+        deleteSceneObjects(app, deletable);
+        app->status = "Deleted selected objects";
+      }
+      app->pendingDeleteObjects.clear();
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel", ImVec2(120.0f, 0.0f))) {
+      app->pendingDeleteObjects.clear();
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+  }
+
   ImGui::Separator();
-  ImGui::TextDisabled("Ctrl+click: multi-select");
+  ImGui::TextDisabled("Ctrl+click: multi-select  |  F2: rename  |  Del: delete  |  Arrows: move");
   ImGui::End();
 }
 
@@ -1521,7 +1673,7 @@ int main() {
     }
 
     // Escape key: cancel extrude, cancel active tool, or exit sketch mode.
-    if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
+    if (!io.WantCaptureKeyboard && glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS) {
       if (app.objectPickMode != ObjectPickMode::None) {
         app.objectPickMode = ObjectPickMode::None;
         app.status = "Selection mode cancelled";
@@ -1537,7 +1689,7 @@ int main() {
     }
 
     // Delete key: remove selected sketch elements.
-    if (app.sceneMode == SceneMode::Sketch &&
+    if (!io.WantCaptureKeyboard && app.sceneMode == SceneMode::Sketch &&
         (glfwGetKey(window, GLFW_KEY_DELETE) == GLFW_PRESS ||
          glfwGetKey(window, GLFW_KEY_BACKSPACE) == GLFW_PRESS)) {
       if (app.activeSketchLocked()) {
