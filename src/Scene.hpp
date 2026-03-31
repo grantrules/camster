@@ -15,6 +15,14 @@ enum class SceneMode { View3D, Sketch };
 enum class SketchPlane { XY, XZ, YZ };
 
 // ---------------------------------------------------------------------------
+// Interaction thresholds (in 2D plane units, i.e. mm)
+// ---------------------------------------------------------------------------
+constexpr float kSnapThreshold   = 3.0f;   // snap-to-point distance
+constexpr float kHitTestThreshold = 5.0f;  // element hit-test distance
+constexpr float kDragThresholdSq = 9.0f;   // squared pixel distance for drag detection
+constexpr float kSnapIndicatorSize = 1.0f; // half-size of snap diamond indicator
+
+// ---------------------------------------------------------------------------
 // Coordinate helpers
 // ---------------------------------------------------------------------------
 
@@ -78,4 +86,25 @@ inline std::optional<glm::vec3> rayPlaneHit(float screenX, float screenY,
   if (t < 0.0f) return std::nullopt;
 
   return origin + t * dir;
+}
+
+// ---------------------------------------------------------------------------
+// Ray construction from screen pixel
+// ---------------------------------------------------------------------------
+
+// Unproject a screen pixel (screenX, screenY) into a world-space ray.
+// Returns origin in `rayO` and normalized direction in `rayD`.
+inline void screenToRay(float screenX, float screenY,
+                        float viewportW, float viewportH,
+                        const glm::mat4& view, const glm::mat4& projection,
+                        glm::vec3& rayO, glm::vec3& rayD) {
+  const float ndcX = (2.0f * screenX / viewportW) - 1.0f;
+  const float ndcY = (2.0f * screenY / viewportH) - 1.0f;
+  const glm::mat4 invVP = glm::inverse(projection * view);
+  glm::vec4 nearW = invVP * glm::vec4(ndcX, ndcY, 0.0f, 1.0f);
+  glm::vec4 farW  = invVP * glm::vec4(ndcX, ndcY, 1.0f, 1.0f);
+  nearW /= nearW.w;
+  farW  /= farW.w;
+  rayO = glm::vec3(nearW);
+  rayD = glm::normalize(glm::vec3(farW - nearW));
 }

@@ -16,6 +16,19 @@ bool toolButton(const char* label, bool active) {
   }
   return clicked;
 }
+
+bool tabButton(const char* label, bool active) {
+  if (active) {
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.2f, 0.2f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.25f, 0.25f, 1.0f));
+  } else {
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.12f, 0.12f, 0.12f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.18f, 0.18f, 0.18f, 1.0f));
+  }
+  bool clicked = ImGui::SmallButton(label);
+  ImGui::PopStyleColor(2);
+  return clicked;
+}
 }  // namespace
 
 ToolbarAction Toolbar::draw(SketchTool& tool, ExtrudeTool& extrude, bool hasSelection,
@@ -44,8 +57,6 @@ ToolbarAction Toolbar::draw(SketchTool& tool, ExtrudeTool& extrude, bool hasSele
     ImGui::Text("Extrude:");
     ImGui::SameLine();
 
-    // Keep the input in sync with the live distance (e.g. from mouse drag).
-    // Only overwrite the buffer when the user is NOT actively typing.
     if (!ImGui::IsItemActive()) {
       const float displayVal = fromMm(extrude.distance(), defaultUnit);
       std::snprintf(extrudeBuffer_, sizeof(extrudeBuffer_), "%.3f", displayVal);
@@ -69,55 +80,131 @@ ToolbarAction Toolbar::draw(SketchTool& tool, ExtrudeTool& extrude, bool hasSele
       action.extrudeConfirmed = true;
     }
   } else {
-    // --- Normal sketch toolbar ---
-    const Tool active = tool.activeTool();
-
-    if (toolButton("Select", active == Tool::None)) tool.setTool(Tool::None);
+    // --- Tab bar ---
+    if (tabButton("Sketch", activeTab_ == Tab::Sketch)) activeTab_ = Tab::Sketch;
     ImGui::SameLine();
-    if (toolButton("Line", active == Tool::Line)) tool.setTool(Tool::Line);
+    if (tabButton("Constrain", activeTab_ == Tab::Constrain)) activeTab_ = Tab::Constrain;
     ImGui::SameLine();
-    if (toolButton("Rect", active == Tool::Rectangle)) tool.setTool(Tool::Rectangle);
-    ImGui::SameLine();
-    if (toolButton("Circle", active == Tool::Circle)) tool.setTool(Tool::Circle);
-    ImGui::SameLine();
-    if (toolButton("Arc", active == Tool::Arc)) tool.setTool(Tool::Arc);
+    if (tabButton("Dimension", activeTab_ == Tab::Dimension)) activeTab_ = Tab::Dimension;
 
     ImGui::SameLine();
     ImGui::Text("|");
     ImGui::SameLine();
 
-    // Extrude button (enabled only when primitives are selected).
-    if (!hasSelection) {
-      ImGui::BeginDisabled();
-    }
-    if (ImGui::Button("Extrude")) {
-      // Signal to main loop to begin extrusion with the current selection.
-      tool.setTool(Tool::None);
-      action.extrudeRequested = true;
-    }
-    if (!hasSelection) {
-      ImGui::EndDisabled();
-    }
+    if (activeTab_ == Tab::Sketch) {
+      // --- Sketch tools ---
+      const Tool active = tool.activeTool();
 
-    // Dimension input (visible when the drawing tool can accept a typed value).
-    if (tool.wantsDimension()) {
+      if (toolButton("Select", active == Tool::None)) tool.setTool(Tool::None);
       ImGui::SameLine();
-      ImGui::Separator();
+      if (toolButton("Line", active == Tool::Line)) tool.setTool(Tool::Line);
       ImGui::SameLine();
-      ImGui::Text("%s:", tool.dimensionPrompt());
+      if (toolButton("Rect", active == Tool::Rectangle)) tool.setTool(Tool::Rectangle);
+      ImGui::SameLine();
+      if (toolButton("Circle", active == Tool::Circle)) tool.setTool(Tool::Circle);
+      ImGui::SameLine();
+      if (toolButton("Arc", active == Tool::Arc)) tool.setTool(Tool::Arc);
+
+      ImGui::SameLine();
+      ImGui::Text("|");
       ImGui::SameLine();
 
-      ImGui::PushItemWidth(120);
-      if (ImGui::InputText("##dim", dimBuffer_, sizeof(dimBuffer_),
-                           ImGuiInputTextFlags_EnterReturnsTrue)) {
-        auto parsed = parseDimension(std::string(dimBuffer_), defaultUnit);
-        if (parsed) {
-          tool.applyDimension(parsed->valueMm);
-          dimBuffer_[0] = '\0';
-        }
+      // Construction toggle (needs selection).
+      if (!hasSelection) ImGui::BeginDisabled();
+      if (ImGui::Button("Construction")) {
+        action.toggleConstruction = true;
       }
-      ImGui::PopItemWidth();
+      if (!hasSelection) ImGui::EndDisabled();
 
+      ImGui::SameLine();
+
+      // Delete (needs selection).
+      if (!hasSelection) ImGui::BeginDisabled();
+      if (ImGui::Button("Delete")) {
+        action.deleteRequested = true;
+      }
+      if (!hasSelection) ImGui::EndDisabled();
+
+      ImGui::SameLine();
+      ImGui::Text("|");
+      ImGui::SameLine();
+
+      // Extrude button.
+      if (!hasSelection) ImGui::BeginDisabled();
+      if (ImGui::Button("Extrude")) {
+        tool.setTool(Tool::None);
+        action.extrudeRequested = true;
+      }
+      if (!hasSelection) ImGui::EndDisabled();
+
+      // Dimension input (visible when the drawing tool can accept a typed value).
+      if (tool.wantsDimension()) {
+        ImGui::SameLine();
+        ImGui::Separator();
+        ImGui::SameLine();
+        ImGui::Text("%s:", tool.dimensionPrompt());
+        ImGui::SameLine();
+
+        ImGui::PushItemWidth(120);
+        if (ImGui::InputText("##dim", dimBuffer_, sizeof(dimBuffer_),
+                             ImGuiInputTextFlags_EnterReturnsTrue)) {
+          auto parsed = parseDimension(std::string(dimBuffer_), defaultUnit);
+          if (parsed) {
+            tool.applyDimension(parsed->valueMm);
+            dimBuffer_[0] = '\0';
+          }
+        }
+        ImGui::PopItemWidth();
+
+        ImGui::SameLine();
+        ImGui::TextDisabled("(%s)", unitSuffix(defaultUnit));
+      }
+
+    } else if (activeTab_ == Tab::Constrain) {
+      // --- Constraint tools (require selection) ---
+      if (!hasSelection) ImGui::BeginDisabled();
+
+      if (ImGui::Button("Horizontal")) action.constraintRequested = ConstraintTool::Horizontal;
+      ImGui::SameLine();
+      if (ImGui::Button("Vertical")) action.constraintRequested = ConstraintTool::Vertical;
+      ImGui::SameLine();
+      if (ImGui::Button("Fixed")) action.constraintRequested = ConstraintTool::Fixed;
+      ImGui::SameLine();
+      if (ImGui::Button("Coincident")) action.constraintRequested = ConstraintTool::Coincident;
+      ImGui::SameLine();
+      if (ImGui::Button("Parallel")) action.constraintRequested = ConstraintTool::Parallel;
+      ImGui::SameLine();
+      if (ImGui::Button("Perpendicular")) action.constraintRequested = ConstraintTool::Perpendicular;
+      ImGui::SameLine();
+      if (ImGui::Button("Equal")) action.constraintRequested = ConstraintTool::Equal;
+      ImGui::SameLine();
+      if (ImGui::Button("Tangent")) action.constraintRequested = ConstraintTool::Tangent;
+      ImGui::SameLine();
+      if (ImGui::Button("Midpoint")) action.constraintRequested = ConstraintTool::Midpoint;
+
+      if (!hasSelection) ImGui::EndDisabled();
+
+    } else if (activeTab_ == Tab::Dimension) {
+      // --- Dimension constraint tools (require selection + value input) ---
+      if (!hasSelection) ImGui::BeginDisabled();
+
+      if (ImGui::Button("Length")) action.constraintRequested = ConstraintTool::Length;
+      ImGui::SameLine();
+      if (ImGui::Button("Radius")) action.constraintRequested = ConstraintTool::Radius;
+      ImGui::SameLine();
+      if (ImGui::Button("Angle")) action.constraintRequested = ConstraintTool::Angle;
+
+      if (!hasSelection) ImGui::EndDisabled();
+
+      ImGui::SameLine();
+      ImGui::Text("|");
+      ImGui::SameLine();
+
+      ImGui::Text("Value:");
+      ImGui::SameLine();
+      ImGui::PushItemWidth(120);
+      ImGui::InputText("##cval", constraintValueBuffer_, sizeof(constraintValueBuffer_));
+      ImGui::PopItemWidth();
       ImGui::SameLine();
       ImGui::TextDisabled("(%s)", unitSuffix(defaultUnit));
     }

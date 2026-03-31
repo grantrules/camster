@@ -26,6 +26,7 @@
 #include "sketch/Profile.hpp"
 #include "sketch/Sketch.hpp"
 #include "sketch/SketchTool.hpp"
+#include "sketch/Constraint.hpp"
 #include "ui/FileBrowser.hpp"
 #include "ui/Toolbar.hpp"
 
@@ -51,7 +52,6 @@ struct AppState {
   Toolbar toolbar;
   AppSettings appSettings;
   Project project;
-  bool extrudeButtonPressed = false;  // set by toolbar, consumed by main loop
   bool showAppSettings = false;
   bool showProjectSettings = false;
 
@@ -425,17 +425,57 @@ int main() {
 
       std::vector<std::vector<glm::vec2>> polylines;
       for (size_t idx : sel) {
-        polylines.push_back(profile::tessellate2D(sketch.primitives()[idx]));
+        const auto& elems = sketch.elements();
+        if (!elems[idx].construction)
+          polylines.push_back(profile::tessellate2D(elems[idx].geometry));
       }
 
       auto profiles = profile::chainProfiles(polylines);
       if (!profiles.empty()) {
         app.extrudeTool.begin(std::move(profiles), app.activePlane);
-        // Switch to isometric so the user can see the extrusion in 3D.
         app.camera.snap(CameraController::Orientation::Isometric);
         app.status = "Drag or type distance, then Confirm";
       } else {
         app.status = "Selection does not form a closed profile";
+      }
+    }
+
+    // Handle delete request.
+    if (toolbarAction.deleteRequested) {
+      app.activeSketch().deleteSelected();
+      app.status = "Deleted selected elements";
+    }
+
+    // Handle construction toggle.
+    if (toolbarAction.toggleConstruction) {
+      for (size_t idx : app.activeSketch().selectedIndices()) {
+        app.activeSketch().toggleConstruction(idx);
+      }
+      app.status = "Toggled construction";
+    }
+
+    // Handle constraint requests from toolbar.
+    if (toolbarAction.constraintRequested != ConstraintTool::None) {
+      auto& sketch = app.activeSketch();
+      float valueMm = 0.0f;
+      // Dimensional constraints need a parsed value.
+      if (toolbarAction.constraintRequested == ConstraintTool::Length ||
+          toolbarAction.constraintRequested == ConstraintTool::Radius ||
+          toolbarAction.constraintRequested == ConstraintTool::Angle) {
+        auto parsed = parseDimension(std::string(app.toolbar.constraintValue()),
+                                     app.project.defaultUnit);
+        if (parsed) {
+          valueMm = parsed->valueMm;
+        } else {
+          app.status = (toolbarAction.constraintRequested == ConstraintTool::Angle)
+                           ? "Enter angle in degrees"
+                           : "Enter a value in the Dimension tab";
+          valueMm = -1.0f;  // signal: skip
+        }
+      }
+      if (valueMm >= 0.0f) {
+        app.status = sketch.applyConstraintToSelection(
+            toolbarAction.constraintRequested, valueMm);
       }
     }
 
@@ -469,16 +509,10 @@ int main() {
         const glm::mat4 view = app.camera.viewMatrix();
         const glm::mat4 proj = app.camera.projectionMatrix(app.renderer.framebufferAspect());
 
-        // Unproject near point as ray origin, far-near as direction.
-        const float ndcX = (2.0f * static_cast<float>(x) / static_cast<float>(fbW)) - 1.0f;
-        const float ndcY = (2.0f * static_cast<float>(y) / static_cast<float>(fbH)) - 1.0f;
-        const glm::mat4 invVP = glm::inverse(proj * view);
-        glm::vec4 nearW = invVP * glm::vec4(ndcX, ndcY, 0.0f, 1.0f);
-        glm::vec4 farW = invVP * glm::vec4(ndcX, ndcY, 1.0f, 1.0f);
-        nearW /= nearW.w;
-        farW /= farW.w;
-        const glm::vec3 rayO(nearW);
-        const glm::vec3 rayD = glm::normalize(glm::vec3(farW - nearW));
+        glm::vec3 rayO, rayD;
+        screenToRay(static_cast<float>(x), static_cast<float>(y),
+                    static_cast<float>(fbW), static_cast<float>(fbH),
+                    view, proj, rayO, rayD);
 
         if (leftDown && !app.wasLeftDown) {
           app.extrudeTool.mouseDown(rayO, rayD);
@@ -501,6 +535,11 @@ int main() {
                                view, proj, app.activePlane);
         if (hit) {
           glm::vec2 planePos = toPlane(*hit, app.activePlane);
+
+          // Snap to existing control points.
+          auto snap = app.activeSketch().snapToPoint(planePos, kSnapThreshold);
+          if (snap) planePos = *snap;
+
           app.sketchTool.mouseMove(planePos);
 
           if (leftDown && !app.wasLeftDown) {
@@ -525,7 +564,7 @@ int main() {
           // Mouse held: check if we've moved enough to start a drag-select.
           app.dragCurScreen = {static_cast<float>(x), static_cast<float>(y)};
           const glm::vec2 delta = app.dragCurScreen - app.dragStartScreen;
-          if (glm::dot(delta, delta) > 9.0f) {  // 3-pixel threshold
+          if (glm::dot(delta, delta) > kDragThresholdSq) {
             app.dragSelecting = true;
           }
         } else if (!leftDown && app.wasLeftDown) {
@@ -554,7 +593,7 @@ int main() {
                                    view, proj, app.activePlane);
             if (hit) {
               glm::vec2 planePos = toPlane(*hit, app.activePlane);
-              auto idx = app.activeSketch().hitTest(planePos, 5.0f);
+              auto idx = app.activeSketch().hitTest(planePos, kHitTestThreshold);
               if (idx) {
                 if (ctrlHeld) {
                   app.activeSketch().toggleSelect(*idx);
@@ -582,23 +621,17 @@ int main() {
 
           // If mouse barely moved, treat as a click → pick object.
           const glm::vec2 cur(static_cast<float>(x), static_cast<float>(y));
-          if (glm::dot(cur - app.dragStartScreen, cur - app.dragStartScreen) < 9.0f) {
+          if (glm::dot(cur - app.dragStartScreen, cur - app.dragStartScreen) < kDragThresholdSq) {
             int fbW = 0, fbH = 0;
             glfwGetFramebufferSize(window, &fbW, &fbH);
             const glm::mat4 view = app.camera.viewMatrix();
             const glm::mat4 proj =
                 app.camera.projectionMatrix(app.renderer.framebufferAspect());
-            const float ndcX =
-                (2.0f * static_cast<float>(x) / static_cast<float>(fbW)) - 1.0f;
-            const float ndcY =
-                (2.0f * static_cast<float>(y) / static_cast<float>(fbH)) - 1.0f;
-            const glm::mat4 invVP = glm::inverse(proj * view);
-            glm::vec4 nearW = invVP * glm::vec4(ndcX, ndcY, 0.0f, 1.0f);
-            glm::vec4 farW = invVP * glm::vec4(ndcX, ndcY, 1.0f, 1.0f);
-            nearW /= nearW.w;
-            farW /= farW.w;
-            const glm::vec3 rayO(nearW);
-            const glm::vec3 rayD = glm::normalize(glm::vec3(farW - nearW));
+
+            glm::vec3 rayO, rayD;
+            screenToRay(static_cast<float>(x), static_cast<float>(y),
+                        static_cast<float>(fbW), static_cast<float>(fbH),
+                        view, proj, rayO, rayD);
 
             int hit = pickObject(app, rayO, rayD);
             app.selectedObject = hit;
@@ -631,6 +664,55 @@ int main() {
       }
     }
 
+    // Delete key: remove selected sketch elements.
+    if (app.sceneMode == SceneMode::Sketch &&
+        (glfwGetKey(window, GLFW_KEY_DELETE) == GLFW_PRESS ||
+         glfwGetKey(window, GLFW_KEY_BACKSPACE) == GLFW_PRESS)) {
+      if (app.activeSketch().hasSelection()) {
+        app.activeSketch().deleteSelected();
+        app.status = "Deleted selected elements";
+      }
+    }
+
+    // Right-click context menu (sketch mode).
+    if (app.sceneMode == SceneMode::Sketch && !app.extrudeTool.active()) {
+      if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS &&
+          !io.WantCaptureMouse) {
+        ImGui::OpenPopup("##sketchCtx");
+      }
+      if (ImGui::BeginPopup("##sketchCtx")) {
+        if (ImGui::MenuItem("Select", nullptr, false, true)) {
+          app.sketchTool.setTool(Tool::None);
+        }
+        if (ImGui::MenuItem("Line")) app.sketchTool.setTool(Tool::Line);
+        if (ImGui::MenuItem("Rectangle")) app.sketchTool.setTool(Tool::Rectangle);
+        if (ImGui::MenuItem("Circle")) app.sketchTool.setTool(Tool::Circle);
+        if (ImGui::MenuItem("Arc")) app.sketchTool.setTool(Tool::Arc);
+        ImGui::Separator();
+        bool hasSel = app.activeSketch().hasSelection();
+        if (ImGui::MenuItem("Toggle Construction", nullptr, false, hasSel)) {
+          for (size_t idx : app.activeSketch().selectedIndices()) {
+            app.activeSketch().toggleConstruction(idx);
+          }
+        }
+        if (ImGui::MenuItem("Delete", "Del", false, hasSel)) {
+          app.activeSketch().deleteSelected();
+          app.status = "Deleted selected elements";
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Horizontal", nullptr, false, hasSel)) {
+          app.activeSketch().applyConstraintToSelection(ConstraintTool::Horizontal, 0.0f);
+        }
+        if (ImGui::MenuItem("Vertical", nullptr, false, hasSel)) {
+          app.activeSketch().applyConstraintToSelection(ConstraintTool::Vertical, 0.0f);
+        }
+        if (ImGui::MenuItem("Fixed", nullptr, false, hasSel)) {
+          app.activeSketch().applyConstraintToSelection(ConstraintTool::Fixed, 0.0f);
+        }
+        ImGui::EndPopup();
+      }
+    }
+
     // Consume completed sketch primitives.
     if (auto prim = app.sketchTool.takeResult()) {
       app.activeSketch().addPrimitive(std::move(*prim));
@@ -643,7 +725,38 @@ int main() {
     if (app.sceneMode == SceneMode::Sketch) {
       appendGrid(allLines, app.activePlane, app.project.gridExtent, app.project.gridSpacing);
       app.activeSketch().appendLines(allLines, app.activePlane);
+      app.activeSketch().appendConstraintAnnotations(allLines, app.activePlane);
       app.sketchTool.appendPreview(allLines, app.activePlane);
+
+      // Snap indicator: show a small diamond at the snap point when drawing.
+      if (app.sketchTool.activeTool() != Tool::None) {
+        double mx = 0.0, my = 0.0;
+        glfwGetCursorPos(window, &mx, &my);
+        int fbW = 0, fbH = 0;
+        glfwGetFramebufferSize(window, &fbW, &fbH);
+        const glm::mat4 view = app.camera.viewMatrix();
+        const glm::mat4 proj = app.camera.projectionMatrix(app.renderer.framebufferAspect());
+        auto hit = rayPlaneHit(static_cast<float>(mx), static_cast<float>(my),
+                               static_cast<float>(fbW), static_cast<float>(fbH),
+                               view, proj, app.activePlane);
+        if (hit) {
+          glm::vec2 pp = toPlane(*hit, app.activePlane);
+          auto snap = app.activeSketch().snapToPoint(pp, kSnapThreshold);
+          if (snap) {
+            const float sz = kSnapIndicatorSize;
+            const glm::vec4 snapColor{0.0f, 1.0f, 0.0f, 1.0f};
+            glm::vec2 s = *snap;
+            allLines.push_back({toWorld(s + glm::vec2(0, sz), app.activePlane), snapColor});
+            allLines.push_back({toWorld(s + glm::vec2(sz, 0), app.activePlane), snapColor});
+            allLines.push_back({toWorld(s + glm::vec2(sz, 0), app.activePlane), snapColor});
+            allLines.push_back({toWorld(s + glm::vec2(0, -sz), app.activePlane), snapColor});
+            allLines.push_back({toWorld(s + glm::vec2(0, -sz), app.activePlane), snapColor});
+            allLines.push_back({toWorld(s + glm::vec2(-sz, 0), app.activePlane), snapColor});
+            allLines.push_back({toWorld(s + glm::vec2(-sz, 0), app.activePlane), snapColor});
+            allLines.push_back({toWorld(s + glm::vec2(0, sz), app.activePlane), snapColor});
+          }
+        }
+      }
     }
 
     // Extrude preview lines (visible from any view).
