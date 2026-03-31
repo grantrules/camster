@@ -9,6 +9,11 @@
 #include <utility>
 #include <vector>
 
+#ifndef _WIN32
+#  include <unistd.h>
+#  include <sys/types.h>
+#endif
+
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 
@@ -19,6 +24,7 @@
 #include "ColorVertex.hpp"
 #include "Gizmo.hpp"
 #include "Project.hpp"
+#include "PrintSettings.hpp"
 #include "Scene.hpp"
 #include "StlMesh.hpp"
 #include "VulkanRenderer.hpp"
@@ -29,9 +35,15 @@
 #include "sketch/Constraint.hpp"
 #include "ui/FileBrowser.hpp"
 #include "ui/Toolbar.hpp"
+#include "ui/PrintWindow.hpp"
 
 namespace {
 struct AppState {
+  // 3D Print
+  PrintSettings printSettings;
+  PrintWindow   printWindow;
+  FileBrowser   slicerBrowser;
+
   VulkanRenderer renderer;
   CameraController camera;
   StlMesh mesh;       // combined mesh sent to renderer
@@ -82,6 +94,26 @@ void framebufferResizeCallback(GLFWwindow* window, int, int) {
   if (app) {
     app->renderer.markFramebufferResized();
   }
+}
+
+// Launch an external slicer with the given STL file.  The slicer runs
+// independently; we do not wait for it to exit.
+bool launchSlicer(const std::string& slicerPath, const std::string& stlPath) {
+#ifdef _WIN32
+  // Windows: spawn via cmd /c to avoid blocking the main process.
+  std::string cmd = "\"\"" + slicerPath + "\" \"" + stlPath + "\"\"";
+  return std::system(cmd.c_str()) == 0;
+#else
+  pid_t pid = ::fork();
+  if (pid < 0) return false;
+  if (pid == 0) {
+    // Child: exec the slicer detached from this process.
+    const char* args[] = {slicerPath.c_str(), stlPath.c_str(), nullptr};
+    ::execvp(slicerPath.c_str(), const_cast<char* const*>(args));
+    ::_exit(1);  // exec failed
+  }
+  return true;  // parent continues immediately
+#endif
 }
 
 void rebuildCombinedMesh(AppState* app) {
@@ -205,6 +237,11 @@ void drawMenuBar(AppState* app) {
       if (!app->exportBrowser.isVisible()) {
         app->exportBrowser.show({{"STL Files", {".stl"}}}, {}, "Export STL", "Export");
       }
+    }
+    ImGui::Separator();
+    if (ImGui::MenuItem("3D Print...", nullptr, false, !app->sceneObjects.empty())) {
+      app->printWindow.show(static_cast<int>(app->sceneObjects.size()),
+                            app->printSettings);
     }
     ImGui::EndMenu();
   }
@@ -392,6 +429,7 @@ int main() {
 
   app.appSettings.load();  // load saved app settings (no-op if file missing)
   app.project.initFromAppSettings(app.appSettings);
+  app.printSettings.load();
 
   app.sceneObjects.push_back(StlMesh::makeUnitCube());
   rebuildCombinedMesh(&app);
@@ -849,6 +887,46 @@ int main() {
             app.status = "Export failed: " + err;
           }
         }
+      }
+    }
+
+    // --- 3D Print window ---
+    if (app.printWindow.isVisible()) {
+      if (app.printWindow.draw(app.sceneObjects, app.printSettings)) {
+        // User clicked Print: merge selected objects into a temp STL and
+        // launch the slicer.
+        const auto& sel = app.printWindow.selectedObjects();
+        StlMesh exportMesh;
+        for (int i = 0; i < static_cast<int>(app.sceneObjects.size()); ++i) {
+          if (i < static_cast<int>(sel.size()) && sel[i])
+            exportMesh.append(app.sceneObjects[i]);
+        }
+        if (!exportMesh.empty()) {
+          const auto tmpPath =
+              (std::filesystem::temp_directory_path() / "camster_print.stl").string();
+          std::string err;
+          if (!exportMesh.saveAsBinary(tmpPath, err)) {
+            app.status = "3D Print: export failed: " + err;
+          } else if (!launchSlicer(app.printWindow.currentSlicer(), tmpPath)) {
+            app.status = "3D Print: failed to launch slicer";
+          } else {
+            app.status = "Opened in slicer: " + app.printWindow.currentSlicer();
+          }
+        }
+      }
+    }
+
+    // --- Slicer file browser (opened by PrintWindow "Browse" button) ---
+    if (app.printWindow.slicerBrowseRequested()) {
+      app.printWindow.consumeBrowseRequest();
+      app.slicerBrowser.show({}, {}, "Select Slicer Executable", "Select");
+    }
+    if (app.slicerBrowser.isVisible()) {
+      if (app.slicerBrowser.draw() && app.slicerBrowser.confirmed()) {
+        const std::string path = app.slicerBrowser.selectedPath().string();
+        app.printWindow.setSlicerPath(path);
+        app.printSettings.addRecent(path);
+        app.printSettings.save();
       }
     }
 

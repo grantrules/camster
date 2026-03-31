@@ -61,12 +61,14 @@ set(CAMSTER_SOURCES
   src/Gizmo.cpp
   src/StlMesh.cpp
   src/VulkanRenderer.cpp
-  src/sketch/Extrude.cpp
+    src/PrintSettings.cpp
+    src/sketch/Extrude.cpp
   src/sketch/ExtrudeTool.cpp
   src/sketch/Sketch.cpp
   src/sketch/SketchTool.cpp
   src/ui/FileBrowser.cpp
   src/ui/Toolbar.cpp
+    src/ui/PrintWindow.cpp
 )
 
 add_executable(camster ${CAMSTER_SOURCES})
