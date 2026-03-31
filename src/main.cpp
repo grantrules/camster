@@ -72,6 +72,18 @@ struct Aabb {
   bool valid = false;
 };
 
+struct ObjectMetadata {
+  std::array<char, 64> name{};
+  bool visible = true;
+  bool locked = false;
+};
+
+struct SketchMetadata {
+  std::array<char, 64> name{};
+  bool visible = true;
+  bool locked = false;
+};
+
 void addUniqueIndex(std::vector<int>& list, int idx) {
   if (idx < 0) return;
   if (std::find(list.begin(), list.end(), idx) == list.end()) {
@@ -113,6 +125,27 @@ bool aabbOverlap(const Aabb& a, const Aabb& b) {
          a.min.z <= b.max.z && a.max.z >= b.min.z;
 }
 
+template <size_t N>
+void setName(std::array<char, N>& dest, const std::string& value) {
+  std::snprintf(dest.data(), dest.size(), "%s", value.c_str());
+}
+
+bool hasIndex(const std::vector<int>& list, int idx) {
+  return std::find(list.begin(), list.end(), idx) != list.end();
+}
+
+void setSingleOrMultiSelection(std::vector<int>& list, int idx, bool multiSelect) {
+  if (!multiSelect) {
+    list.assign(1, idx);
+    return;
+  }
+  if (hasIndex(list, idx)) {
+    eraseIndex(list, idx);
+  } else {
+    list.push_back(idx);
+  }
+}
+
 struct AppState {
   // 3D Print
   PrintSettings printSettings;
@@ -127,7 +160,11 @@ struct AppState {
 
   // Individual mesh objects for selection / export.
   std::vector<StlMesh> sceneObjects;
+  std::vector<ObjectMetadata> sceneObjectMeta;
   int selectedObject = -1;  // index into sceneObjects, -1 = none
+  int nextObjectNumber = 1;
+  std::vector<int> browserSelectedObjects;
+  std::vector<int> browserSelectedSketches;
   ObjectPickMode objectPickMode = ObjectPickMode::None;
   ExtrudeOptionsState extrudeOptions;
   CombineOptionsState combineOptions;
@@ -136,6 +173,7 @@ struct AppState {
   SceneMode sceneMode = SceneMode::View3D;
   SketchPlane activePlane = SketchPlane::XY;
   Sketch sketches[3];  // one per SketchPlane
+  std::array<SketchMetadata, 3> sketchMeta;
   SketchTool sketchTool;
   ExtrudeTool extrudeTool;
   Gizmo gizmo;
@@ -146,6 +184,9 @@ struct AppState {
   bool showProjectSettings = false;
 
   Sketch& activeSketch() { return sketches[static_cast<int>(activePlane)]; }
+  SketchMetadata& activeSketchMeta() { return sketchMeta[static_cast<int>(activePlane)]; }
+  bool activeSketchLocked() const { return sketchMeta[static_cast<int>(activePlane)].locked; }
+  bool activeSketchVisible() const { return sketchMeta[static_cast<int>(activePlane)].visible; }
 
   std::string status = "Ready";
   bool dragging = false;
@@ -166,6 +207,33 @@ struct AppState {
   std::future<LoadResult> pendingLoad;
   bool loadingMesh = false;
 };
+
+void initializeSketchMetadata(AppState* app) {
+  setName(app->sketchMeta[0].name, "Sketch 1");
+  setName(app->sketchMeta[1].name, "Sketch 2");
+  setName(app->sketchMeta[2].name, "Sketch 3");
+  for (auto& meta : app->sketchMeta) {
+    meta.visible = true;
+    meta.locked = false;
+  }
+}
+
+void appendSceneObject(AppState* app, StlMesh mesh) {
+  app->sceneObjects.push_back(std::move(mesh));
+  ObjectMetadata meta;
+  setName(meta.name, "Object " + std::to_string(app->nextObjectNumber++));
+  meta.visible = true;
+  meta.locked = false;
+  app->sceneObjectMeta.push_back(meta);
+}
+
+void clearSceneObjects(AppState* app) {
+  app->sceneObjects.clear();
+  app->sceneObjectMeta.clear();
+  app->browserSelectedObjects.clear();
+  app->selectedObject = -1;
+  app->nextObjectNumber = 1;
+}
 
 void framebufferResizeCallback(GLFWwindow* window, int, int) {
   auto* app = static_cast<AppState*>(glfwGetWindowUserPointer(window));
@@ -195,9 +263,17 @@ bool launchSlicer(const std::string& slicerPath, const std::string& stlPath) {
 }
 
 void rebuildCombinedMesh(AppState* app) {
+  sanitizeObjectIndices(app->browserSelectedObjects, static_cast<int>(app->sceneObjects.size()));
+  if (app->selectedObject >= static_cast<int>(app->sceneObjects.size())) {
+    app->selectedObject = app->sceneObjects.empty() ? -1 : 0;
+  }
   app->mesh = StlMesh();
-  for (const auto& obj : app->sceneObjects) {
-    app->mesh.append(obj);
+  for (int i = 0; i < static_cast<int>(app->sceneObjects.size()); ++i) {
+    if (i < static_cast<int>(app->sceneObjectMeta.size()) &&
+        !app->sceneObjectMeta[i].visible) {
+      continue;
+    }
+    app->mesh.append(app->sceneObjects[i]);
   }
   app->renderer.setMesh(app->mesh);
 }
@@ -208,10 +284,16 @@ bool applyAddExtrude(AppState* app, const StlMesh& extruded,
 
   std::vector<int> targets = targetsRaw;
   sanitizeObjectIndices(targets, static_cast<int>(app->sceneObjects.size()));
+  targets.erase(std::remove_if(targets.begin(), targets.end(), [app](int idx) {
+                  return idx >= static_cast<int>(app->sceneObjectMeta.size()) ||
+                         app->sceneObjectMeta[idx].locked;
+                }),
+                targets.end());
 
   if (targets.empty()) {
-    app->sceneObjects.push_back(extruded);
+    appendSceneObject(app, extruded);
     app->selectedObject = static_cast<int>(app->sceneObjects.size()) - 1;
+    app->browserSelectedObjects.assign(1, app->selectedObject);
     rebuildCombinedMesh(app);
     return true;
   }
@@ -226,14 +308,24 @@ bool applyAddExtrude(AppState* app, const StlMesh& extruded,
   for (int idx : targets) remove[idx] = true;
 
   std::vector<StlMesh> next;
+  std::vector<ObjectMetadata> nextMeta;
   next.reserve(app->sceneObjects.size() + 1);
+  nextMeta.reserve(app->sceneObjectMeta.size() + 1);
   for (int i = 0; i < static_cast<int>(app->sceneObjects.size()); ++i) {
-    if (!remove[i]) next.push_back(std::move(app->sceneObjects[i]));
+    if (!remove[i]) {
+      next.push_back(std::move(app->sceneObjects[i]));
+      nextMeta.push_back(app->sceneObjectMeta[i]);
+    }
   }
   next.push_back(std::move(merged));
+  ObjectMetadata mergedMeta;
+  setName(mergedMeta.name, "Object " + std::to_string(app->nextObjectNumber++));
+  nextMeta.push_back(mergedMeta);
 
   app->sceneObjects = std::move(next);
+  app->sceneObjectMeta = std::move(nextMeta);
   app->selectedObject = static_cast<int>(app->sceneObjects.size()) - 1;
+  app->browserSelectedObjects.assign(1, app->selectedObject);
   rebuildCombinedMesh(app);
   return true;
 }
@@ -244,6 +336,16 @@ bool applyAddCombine(AppState* app, const std::vector<int>& targetsRaw,
   std::vector<int> tools = toolsRaw;
   sanitizeObjectIndices(targets, static_cast<int>(app->sceneObjects.size()));
   sanitizeObjectIndices(tools, static_cast<int>(app->sceneObjects.size()));
+  targets.erase(std::remove_if(targets.begin(), targets.end(), [app](int idx) {
+                  return idx >= static_cast<int>(app->sceneObjectMeta.size()) ||
+                         app->sceneObjectMeta[idx].locked;
+                }),
+                targets.end());
+  tools.erase(std::remove_if(tools.begin(), tools.end(), [app, keepTools](int idx) {
+                return idx >= static_cast<int>(app->sceneObjectMeta.size()) ||
+                       (app->sceneObjectMeta[idx].locked && !keepTools);
+              }),
+              tools.end());
   for (int idx : targets) {
     eraseIndex(tools, idx);
   }
@@ -260,14 +362,24 @@ bool applyAddCombine(AppState* app, const std::vector<int>& targetsRaw,
   }
 
   std::vector<StlMesh> next;
+  std::vector<ObjectMetadata> nextMeta;
   next.reserve(app->sceneObjects.size() + 1);
+  nextMeta.reserve(app->sceneObjectMeta.size() + 1);
   for (int i = 0; i < static_cast<int>(app->sceneObjects.size()); ++i) {
-    if (!remove[i]) next.push_back(std::move(app->sceneObjects[i]));
+    if (!remove[i]) {
+      next.push_back(std::move(app->sceneObjects[i]));
+      nextMeta.push_back(app->sceneObjectMeta[i]);
+    }
   }
   next.push_back(std::move(merged));
+  ObjectMetadata mergedMeta;
+  setName(mergedMeta.name, "Object " + std::to_string(app->nextObjectNumber++));
+  nextMeta.push_back(mergedMeta);
 
   app->sceneObjects = std::move(next);
+  app->sceneObjectMeta = std::move(nextMeta);
   app->selectedObject = static_cast<int>(app->sceneObjects.size()) - 1;
+  app->browserSelectedObjects.assign(1, app->selectedObject);
   rebuildCombinedMesh(app);
   return true;
 }
@@ -278,6 +390,11 @@ bool applySubtractExtrude(AppState* app, const StlMesh& extruded,
 
   std::vector<int> targets = targetsRaw;
   sanitizeObjectIndices(targets, static_cast<int>(app->sceneObjects.size()));
+  targets.erase(std::remove_if(targets.begin(), targets.end(), [app](int idx) {
+                  return idx >= static_cast<int>(app->sceneObjectMeta.size()) ||
+                         app->sceneObjectMeta[idx].locked;
+                }),
+                targets.end());
   if (targets.empty()) return false;
 
   const Aabb toolBox = meshAabb(extruded);
@@ -290,18 +407,23 @@ bool applySubtractExtrude(AppState* app, const StlMesh& extruded,
 
   bool removedAny = false;
   std::vector<StlMesh> next;
+  std::vector<ObjectMetadata> nextMeta;
   next.reserve(app->sceneObjects.size());
+  nextMeta.reserve(app->sceneObjectMeta.size());
   for (int i = 0; i < static_cast<int>(app->sceneObjects.size()); ++i) {
     if (remove[i]) {
       removedAny = true;
       continue;
     }
     next.push_back(std::move(app->sceneObjects[i]));
+    nextMeta.push_back(app->sceneObjectMeta[i]);
   }
 
   if (!removedAny) return false;
   app->sceneObjects = std::move(next);
+  app->sceneObjectMeta = std::move(nextMeta);
   app->selectedObject = app->sceneObjects.empty() ? -1 : 0;
+  app->browserSelectedObjects = app->sceneObjects.empty() ? std::vector<int>{} : std::vector<int>{0};
   rebuildCombinedMesh(app);
   return true;
 }
@@ -312,6 +434,16 @@ bool applySubtractCombine(AppState* app, const std::vector<int>& targetsRaw,
   std::vector<int> tools = toolsRaw;
   sanitizeObjectIndices(targets, static_cast<int>(app->sceneObjects.size()));
   sanitizeObjectIndices(tools, static_cast<int>(app->sceneObjects.size()));
+  targets.erase(std::remove_if(targets.begin(), targets.end(), [app](int idx) {
+                  return idx >= static_cast<int>(app->sceneObjectMeta.size()) ||
+                         app->sceneObjectMeta[idx].locked;
+                }),
+                targets.end());
+  tools.erase(std::remove_if(tools.begin(), tools.end(), [app, keepTools](int idx) {
+                return idx >= static_cast<int>(app->sceneObjectMeta.size()) ||
+                       (app->sceneObjectMeta[idx].locked && !keepTools);
+              }),
+              tools.end());
   for (int idx : targets) {
     eraseIndex(tools, idx);
   }
@@ -337,18 +469,23 @@ bool applySubtractCombine(AppState* app, const std::vector<int>& targetsRaw,
 
   bool removedAny = false;
   std::vector<StlMesh> next;
+  std::vector<ObjectMetadata> nextMeta;
   next.reserve(app->sceneObjects.size());
+  nextMeta.reserve(app->sceneObjectMeta.size());
   for (int i = 0; i < static_cast<int>(app->sceneObjects.size()); ++i) {
     if (remove[i]) {
       removedAny = true;
       continue;
     }
     next.push_back(std::move(app->sceneObjects[i]));
+    nextMeta.push_back(app->sceneObjectMeta[i]);
   }
 
   if (!removedAny) return false;
   app->sceneObjects = std::move(next);
+  app->sceneObjectMeta = std::move(nextMeta);
   app->selectedObject = app->sceneObjects.empty() ? -1 : 0;
+  app->browserSelectedObjects = app->sceneObjects.empty() ? std::vector<int>{} : std::vector<int>{0};
   rebuildCombinedMesh(app);
   return true;
 }
@@ -414,6 +551,9 @@ int pickObject(const AppState& app, glm::vec3 rayO, glm::vec3 rayD) {
   float bestT = std::numeric_limits<float>::max();
   int bestIdx = -1;
   for (int oi = 0; oi < static_cast<int>(app.sceneObjects.size()); ++oi) {
+    if (oi < static_cast<int>(app.sceneObjectMeta.size()) && !app.sceneObjectMeta[oi].visible) {
+      continue;
+    }
     const auto& verts = app.sceneObjects[oi].vertices();
     const auto& inds = app.sceneObjects[oi].indices();
     for (size_t i = 0; i + 2 < inds.size(); i += 3) {
@@ -473,11 +613,12 @@ void drawMenuBar(AppState* app) {
   if (ImGui::BeginMenu("File")) {
     if (ImGui::MenuItem("New Scene")) {
       app->mesh = StlMesh();
-      app->sceneObjects.clear();
-      app->selectedObject = -1;
+      clearSceneObjects(app);
       app->renderer.setMesh(app->mesh);
       exitSketchMode(app);
       for (auto& s : app->sketches) { s.clear(); }
+      initializeSketchMetadata(app);
+      app->browserSelectedSketches.clear();
       app->extrudeTool.cancel();
       app->project.initFromAppSettings(app->appSettings);
       app->status = "New scene";
@@ -669,6 +810,73 @@ void drawProjectSettingsWindow(AppState* app) {
   ImGui::End();
 }
 
+void drawObjectBrowserWindow(AppState* app) {
+  ImGui::SetNextWindowPos(ImVec2(12.0f, 320.0f), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSize(ImVec2(320.0f, 0.0f), ImGuiCond_FirstUseEver);
+  ImGui::Begin("Object Browser");
+
+  const bool multiSelect = ImGui::GetIO().KeyCtrl;
+
+  if (ImGui::CollapsingHeader("Objects", ImGuiTreeNodeFlags_DefaultOpen)) {
+    for (int i = 0; i < static_cast<int>(app->sceneObjects.size()); ++i) {
+      auto& meta = app->sceneObjectMeta[i];
+      ImGui::PushID(i);
+
+      if (ImGui::Checkbox("##objvis", &meta.visible)) {
+        rebuildCombinedMesh(app);
+      }
+      ImGui::SameLine();
+      ImGui::Checkbox("##objlock", &meta.locked);
+      ImGui::SameLine();
+
+      const bool selected = hasIndex(app->browserSelectedObjects, i);
+      if (ImGui::Selectable("##objsel", selected, 0, ImVec2(18.0f, 0.0f))) {
+        setSingleOrMultiSelection(app->browserSelectedObjects, i, multiSelect);
+        if (app->browserSelectedObjects.size() == 1) {
+          app->selectedObject = app->browserSelectedObjects[0];
+        }
+      }
+      ImGui::SameLine();
+      ImGui::SetNextItemWidth(-1.0f);
+      ImGui::InputText("##objname", meta.name.data(), meta.name.size());
+
+      ImGui::PopID();
+    }
+    if (app->sceneObjects.empty()) {
+      ImGui::TextDisabled("(no objects)");
+    }
+  }
+
+  if (ImGui::CollapsingHeader("Sketches", ImGuiTreeNodeFlags_DefaultOpen)) {
+    for (int i = 0; i < 3; ++i) {
+      auto& meta = app->sketchMeta[i];
+      ImGui::PushID(1000 + i);
+
+      ImGui::Checkbox("##skvis", &meta.visible);
+      ImGui::SameLine();
+      ImGui::Checkbox("##sklock", &meta.locked);
+      ImGui::SameLine();
+
+      const bool selected = hasIndex(app->browserSelectedSketches, i);
+      if (ImGui::Selectable("##sksel", selected, 0, ImVec2(18.0f, 0.0f))) {
+        setSingleOrMultiSelection(app->browserSelectedSketches, i, multiSelect);
+        if (app->browserSelectedSketches.size() == 1) {
+          app->activePlane = static_cast<SketchPlane>(app->browserSelectedSketches[0]);
+        }
+      }
+      ImGui::SameLine();
+      ImGui::SetNextItemWidth(-1.0f);
+      ImGui::InputText("##skname", meta.name.data(), meta.name.size());
+
+      ImGui::PopID();
+    }
+  }
+
+  ImGui::Separator();
+  ImGui::TextDisabled("Left toggle: visible   Middle toggle: locked   Ctrl+click: multi-select");
+  ImGui::End();
+}
+
 void drawExtrudeOptionsWindow(AppState* app) {
   if (!app->extrudeOptions.visible) return;
   if (!app->extrudeTool.active()) {
@@ -825,6 +1033,8 @@ int main() {
   AppState app;
   glfwSetWindowUserPointer(window, &app);
   glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
+  initializeSketchMetadata(&app);
+  app.browserSelectedSketches.assign(1, 0);
 
   std::string error;
   if (!app.renderer.initialize(window, error)) {
@@ -838,7 +1048,9 @@ int main() {
   app.project.initFromAppSettings(app.appSettings);
   app.printSettings.load();
 
-  app.sceneObjects.push_back(StlMesh::makeUnitCube());
+  appendSceneObject(&app, StlMesh::makeUnitCube());
+  app.selectedObject = 0;
+  app.browserSelectedObjects.assign(1, 0);
   rebuildCombinedMesh(&app);
 
   while (!glfwWindowShouldClose(window)) {
@@ -855,9 +1067,10 @@ int main() {
       if (!result.success) {
         app.status = "Open failed: " + result.error;
       } else {
-        app.sceneObjects.clear();
-        app.sceneObjects.push_back(std::move(result.mesh));
-        app.selectedObject = -1;
+        clearSceneObjects(&app);
+        appendSceneObject(&app, std::move(result.mesh));
+        app.selectedObject = 0;
+        app.browserSelectedObjects.assign(1, 0);
         rebuildCombinedMesh(&app);
         app.status = "Loaded " + result.path;
       }
@@ -878,6 +1091,11 @@ int main() {
 
     // Handle "Extrude" button press: gather profiles from selection.
     if (toolbarAction.extrudeRequested && !app.extrudeTool.active()) {
+      if (!app.activeSketchVisible()) {
+        app.status = "Active sketch is hidden";
+      } else if (app.activeSketchLocked()) {
+        app.status = "Active sketch is locked";
+      } else {
       const auto& sketch = app.activeSketch();
       const auto sel = sketch.selectedIndices();
 
@@ -907,24 +1125,36 @@ int main() {
       } else {
         app.status = "Selection does not form a closed profile";
       }
+      }
     }
 
     // Handle delete request.
     if (toolbarAction.deleteRequested) {
-      app.activeSketch().deleteSelected();
-      app.status = "Deleted selected elements";
+      if (app.activeSketchLocked()) {
+        app.status = "Active sketch is locked";
+      } else {
+        app.activeSketch().deleteSelected();
+        app.status = "Deleted selected elements";
+      }
     }
 
     // Handle construction toggle.
     if (toolbarAction.toggleConstruction) {
-      for (size_t idx : app.activeSketch().selectedIndices()) {
-        app.activeSketch().toggleConstruction(idx);
+      if (app.activeSketchLocked()) {
+        app.status = "Active sketch is locked";
+      } else {
+        for (size_t idx : app.activeSketch().selectedIndices()) {
+          app.activeSketch().toggleConstruction(idx);
+        }
+        app.status = "Toggled construction";
       }
-      app.status = "Toggled construction";
     }
 
     // Handle constraint requests from toolbar.
     if (toolbarAction.constraintRequested != ConstraintTool::None) {
+      if (app.activeSketchLocked()) {
+        app.status = "Active sketch is locked";
+      } else {
       auto& sketch = app.activeSketch();
       float valueMm = 0.0f;
       // Dimensional constraints need a parsed value.
@@ -945,6 +1175,7 @@ int main() {
       if (valueMm >= 0.0f) {
         app.status = sketch.applyConstraintToSelection(
             toolbarAction.constraintRequested, valueMm);
+      }
       }
     }
 
@@ -987,7 +1218,8 @@ int main() {
         }
 
       } else if (app.sceneMode == SceneMode::Sketch &&
-                 app.sketchTool.activeTool() != Tool::None) {
+                 app.sketchTool.activeTool() != Tool::None &&
+                 app.activeSketchVisible() && !app.activeSketchLocked()) {
         // --- Drawing mode: feed mouse to SketchTool ---
         int fbW = 0, fbH = 0;
         glfwGetFramebufferSize(window, &fbW, &fbH);
@@ -1012,7 +1244,8 @@ int main() {
         }
 
       } else if (app.sceneMode == SceneMode::Sketch &&
-                 app.sketchTool.activeTool() == Tool::None) {
+                 app.sketchTool.activeTool() == Tool::None &&
+                 app.activeSketchVisible() && !app.activeSketchLocked()) {
         // --- Selection mode: click, ctrl-click, or drag-select ---
         int fbW = 0, fbH = 0;
         glfwGetFramebufferSize(window, &fbW, &fbH);
@@ -1137,8 +1370,10 @@ int main() {
             int hit = pickObject(app, rayO, rayD);
             app.selectedObject = hit;
             if (hit >= 0) {
+              app.browserSelectedObjects.assign(1, hit);
               app.status = "Object selected (File > Export STL to save)";
             } else {
+              app.browserSelectedObjects.clear();
               app.status = "Ready";
             }
           }
@@ -1173,28 +1408,32 @@ int main() {
     if (app.sceneMode == SceneMode::Sketch &&
         (glfwGetKey(window, GLFW_KEY_DELETE) == GLFW_PRESS ||
          glfwGetKey(window, GLFW_KEY_BACKSPACE) == GLFW_PRESS)) {
-      if (app.activeSketch().hasSelection()) {
+      if (app.activeSketchLocked()) {
+        app.status = "Active sketch is locked";
+      } else if (app.activeSketch().hasSelection()) {
         app.activeSketch().deleteSelected();
         app.status = "Deleted selected elements";
       }
     }
 
     // Right-click context menu (sketch mode).
-    if (app.sceneMode == SceneMode::Sketch && !app.extrudeTool.active()) {
+    if (app.sceneMode == SceneMode::Sketch && !app.extrudeTool.active() &&
+        app.activeSketchVisible()) {
       if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS &&
           !io.WantCaptureMouse) {
         ImGui::OpenPopup("##sketchCtx");
       }
       if (ImGui::BeginPopup("##sketchCtx")) {
+        const bool sketchUnlocked = !app.activeSketchLocked();
         if (ImGui::MenuItem("Select", nullptr, false, true)) {
           app.sketchTool.setTool(Tool::None);
         }
-        if (ImGui::MenuItem("Line")) app.sketchTool.setTool(Tool::Line);
-        if (ImGui::MenuItem("Rectangle")) app.sketchTool.setTool(Tool::Rectangle);
-        if (ImGui::MenuItem("Circle")) app.sketchTool.setTool(Tool::Circle);
-        if (ImGui::MenuItem("Arc")) app.sketchTool.setTool(Tool::Arc);
+        if (ImGui::MenuItem("Line", nullptr, false, sketchUnlocked)) app.sketchTool.setTool(Tool::Line);
+        if (ImGui::MenuItem("Rectangle", nullptr, false, sketchUnlocked)) app.sketchTool.setTool(Tool::Rectangle);
+        if (ImGui::MenuItem("Circle", nullptr, false, sketchUnlocked)) app.sketchTool.setTool(Tool::Circle);
+        if (ImGui::MenuItem("Arc", nullptr, false, sketchUnlocked)) app.sketchTool.setTool(Tool::Arc);
         ImGui::Separator();
-        bool hasSel = app.activeSketch().hasSelection();
+        bool hasSel = app.activeSketch().hasSelection() && sketchUnlocked;
         if (ImGui::MenuItem("Toggle Construction", nullptr, false, hasSel)) {
           for (size_t idx : app.activeSketch().selectedIndices()) {
             app.activeSketch().toggleConstruction(idx);
@@ -1230,7 +1469,7 @@ int main() {
     std::vector<glm::vec2> danglingPoints;
     app.gizmo.appendLines(allLines);
 
-    if (app.sceneMode == SceneMode::Sketch) {
+    if (app.sceneMode == SceneMode::Sketch && app.activeSketchVisible()) {
       appendGrid(allLines, app.activePlane, app.project.gridExtent, app.project.gridSpacing);
       app.activeSketch().appendLines(allLines, app.activePlane);
       app.activeSketch().appendConstraintAnnotations(allLines, app.activePlane);
@@ -1271,9 +1510,17 @@ int main() {
     app.extrudeTool.appendPreview(allLines);
 
     // Highlight selected 3D object with cyan wireframe overlay.
-    if (app.selectedObject >= 0 &&
-        app.selectedObject < static_cast<int>(app.sceneObjects.size())) {
-      const auto& obj = app.sceneObjects[app.selectedObject];
+    std::vector<int> highlightObjects = app.browserSelectedObjects;
+    sanitizeObjectIndices(highlightObjects, static_cast<int>(app.sceneObjects.size()));
+    if (highlightObjects.empty() && app.selectedObject >= 0) {
+      highlightObjects.push_back(app.selectedObject);
+    }
+    for (int selectedIdx : highlightObjects) {
+      if (selectedIdx >= static_cast<int>(app.sceneObjectMeta.size()) ||
+          !app.sceneObjectMeta[selectedIdx].visible) {
+        continue;
+      }
+      const auto& obj = app.sceneObjects[selectedIdx];
       const auto& verts = obj.vertices();
       const auto& inds = obj.indices();
       const glm::vec4 hlColor(0.0f, 0.8f, 1.0f, 1.0f);
@@ -1293,6 +1540,7 @@ int main() {
     app.renderer.setLines(allLines);
 
     drawPanel(&app);
+    drawObjectBrowserWindow(&app);
     drawAppSettingsWindow(&app);
     drawProjectSettingsWindow(&app);
     drawExtrudeOptionsWindow(&app);
@@ -1400,7 +1648,7 @@ int main() {
       dl->AddRect(p1, p2, IM_COL32(0, 120, 255, 200), 0.0f, 0, 1.5f);
     }
 
-    if (app.sceneMode == SceneMode::Sketch) {
+    if (app.sceneMode == SceneMode::Sketch && app.activeSketchVisible()) {
       ImDrawList* dl = ImGui::GetForegroundDrawList();
       const ImVec2 viewportSize = ImGui::GetIO().DisplaySize;
       const glm::mat4 view = app.camera.viewMatrix();
