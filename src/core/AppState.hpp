@@ -28,13 +28,14 @@
 class PrintSettings;
 
 enum class BooleanOp { Add, Subtract };
+enum class ExtrudeOp { Add, Subtract, CreateNewObject };
 enum class ObjectPickMode { None, ExtrudeTargets, CombineTargets, CombineTools };
 enum class BrowserSection { Objects, Sketches };
 
 struct ExtrudeOptionsState {
   bool visible = false;
   bool applyRequested = false;
-  BooleanOp operation = BooleanOp::Add;
+  ExtrudeOp operation = ExtrudeOp::Add;
   std::vector<int> targets;
   char depthBuffer[64] = {};
 };

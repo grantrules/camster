@@ -221,6 +221,15 @@ void drawMenuBar(AppState* app) {
     ImGui::EndMenu();
   }
 
+  ImGui::Separator();
+  if (app->sceneMode == SceneMode::Sketch && app->hasActiveSketch()) {
+    ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.15f, 1.0f), "MODE: SKETCH");
+    ImGui::SameLine();
+    ImGui::TextDisabled("(%s)", app->activeSketchMeta().name.data());
+  } else {
+    ImGui::TextDisabled("MODE: 3D VIEW");
+  }
+
   ImGui::EndMainMenuBar();
 }
 
@@ -831,6 +840,14 @@ void drawObjectBrowserWindow(AppState* app) {
 
 void drawExtrudeOptionsWindow(AppState* app) {
   if (!app->extrudeOptions.visible) return;
+  if (app->sceneMode != SceneMode::Sketch || !app->hasActiveSketch()) {
+    app->extrudeTool.cancel();
+    app->extrudeOptions.visible = false;
+    if (app->objectPickMode == ObjectPickMode::ExtrudeTargets) {
+      app->objectPickMode = ObjectPickMode::None;
+    }
+    return;
+  }
   if (!app->extrudeTool.active()) {
     app->extrudeOptions.visible = false;
     app->objectPickMode = ObjectPickMode::None;
@@ -841,8 +858,14 @@ void drawExtrudeOptionsWindow(AppState* app) {
   bool open = app->extrudeOptions.visible;
   if (ImGui::Begin("Extrude Options", &open)) {
     int op = static_cast<int>(app->extrudeOptions.operation);
-    if (ImGui::Combo("Operation", &op, "Add\0Subtract\0")) {
-      app->extrudeOptions.operation = static_cast<BooleanOp>(op);
+    if (ImGui::Combo("Operation", &op, "Add\0Subtract\0Create New Object\0")) {
+      app->extrudeOptions.operation = static_cast<ExtrudeOp>(op);
+      if (app->extrudeOptions.operation == ExtrudeOp::CreateNewObject) {
+        app->extrudeOptions.targets.clear();
+        if (app->objectPickMode == ObjectPickMode::ExtrudeTargets) {
+          app->objectPickMode = ObjectPickMode::None;
+        }
+      }
     }
 
     ImGui::Text("Depth:");
@@ -854,8 +877,12 @@ void drawExtrudeOptionsWindow(AppState* app) {
     ImGui::TextDisabled("(%s)", unitSuffix(app->project.defaultUnit));
 
     ImGui::Separator();
-    drawObjectSelectionList("Target Objects", app->extrudeOptions.targets,
-                            ObjectPickMode::ExtrudeTargets, app);
+    if (app->extrudeOptions.operation == ExtrudeOp::CreateNewObject) {
+      ImGui::TextDisabled("Target selection is disabled in Create New Object mode.");
+    } else {
+      drawObjectSelectionList("Target Objects", app->extrudeOptions.targets,
+                              ObjectPickMode::ExtrudeTargets, app);
+    }
 
     ImGui::Separator();
     bool applyNow = app->extrudeOptions.applyRequested;
@@ -875,7 +902,9 @@ void drawExtrudeOptionsWindow(AppState* app) {
         app->status = "Extrude: enter a valid depth";
       } else {
         app->extrudeTool.setDistance(parsed->valueMm);
-        const bool subtract = (app->extrudeOptions.operation == BooleanOp::Subtract);
+        const bool subtract = (app->extrudeOptions.operation == ExtrudeOp::Subtract);
+        const bool createNewObject =
+          (app->extrudeOptions.operation == ExtrudeOp::CreateNewObject);
         const auto profiles = app->extrudeTool.profiles();
         const auto extrudePlane = app->extrudeTool.plane();
         const float depthMm = parsed->valueMm;
@@ -893,11 +922,16 @@ void drawExtrudeOptionsWindow(AppState* app) {
                                   : 0.0f;
           ea.depthMm = depthMm;
           ea.subtract = subtract;
-          ea.targetObjectNames = objectNames(app, app->extrudeOptions.targets);
+            const auto targetNames = createNewObject
+                           ? std::vector<int>{}
+                           : app->extrudeOptions.targets;
+            ea.targetObjectNames = objectNames(app, targetNames);
           ea.resultObjectName = objectName(
               app, static_cast<int>(app->sceneObjects.size()) - 1);
           app->timeline.push(std::move(ea),
-                             std::string(subtract ? "Subtract Extrude" : "Add Extrude"));
+                     std::string(createNewObject
+                             ? "Extrude New Object"
+                             : (subtract ? "Subtract Extrude" : "Add Extrude")));
         };
 
         if (subtract) {
@@ -910,11 +944,12 @@ void drawExtrudeOptionsWindow(AppState* app) {
           app->extrudeOptions.visible = false;
           app->objectPickMode = ObjectPickMode::None;
         } else {
-          if (!applyAddExtrude(app, extruded, app->extrudeOptions.targets)) {
+          const auto targets = createNewObject ? std::vector<int>{} : app->extrudeOptions.targets;
+          if (!applyAddExtrude(app, extruded, targets)) {
             app->status = "Extrude failed";
           } else {
             recordExtrude();
-            app->status = "Extrude add complete";
+            app->status = createNewObject ? "Extrude new object complete" : "Extrude add complete";
             app->extrudeOptions.visible = false;
             app->objectPickMode = ObjectPickMode::None;
           }

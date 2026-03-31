@@ -185,7 +185,7 @@ int main() {
         app.camera.snap(CameraController::Orientation::Isometric);
         app.extrudeOptions.visible = true;
         app.extrudeOptions.applyRequested = false;
-        app.extrudeOptions.operation = BooleanOp::Add;
+        app.extrudeOptions.operation = ExtrudeOp::Add;
         app.extrudeOptions.targets.clear();
         if (app.selectedObject >= 0) {
           addUniqueIndex(app.extrudeOptions.targets, app.selectedObject);
@@ -699,8 +699,10 @@ int main() {
       }
     }
 
-    // Extrude preview lines (visible from any view).
-    app.extrudeTool.appendPreview(allLines);
+    // Extrude preview lines are sketch-mode only.
+    if (app.sceneMode == SceneMode::Sketch && app.hasActiveSketch()) {
+      app.extrudeTool.appendPreview(allLines);
+    }
 
     // Highlight selected 3D object with cyan wireframe overlay.
     std::vector<int> highlightObjects = app.browserSelectedObjects;
