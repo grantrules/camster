@@ -56,6 +56,7 @@ target_link_libraries(imgui PUBLIC glfw Vulkan::Vulkan)
 
 set(CAMSTER_SOURCES
   src/main.cpp
+  src/AppSettings.cpp
   src/CameraController.cpp
   src/Gizmo.cpp
   src/StlMesh.cpp

@@ -165,6 +165,63 @@ bool StlMesh::saveAsBinary(const std::string& path, std::string& error) const {
   return true;
 }
 
+bool StlMesh::saveAsBinaryScaled(const std::string& path, float scale,
+                                  std::string& error) const {
+  error.clear();
+
+  if (indices_.size() % 3 != 0 || vertices_.empty()) {
+    error = "Mesh has no triangle data to export.";
+    return false;
+  }
+
+  std::ofstream out(path, std::ios::binary);
+  if (!out) {
+    error = "Could not open output file: " + path;
+    return false;
+  }
+
+  std::array<char, 80> header{};
+  const std::string stamp = "camster STL export";
+  std::memcpy(header.data(), stamp.data(), stamp.size());
+  out.write(header.data(), header.size());
+
+  const uint32_t triangleCount = static_cast<uint32_t>(indices_.size() / 3);
+  out.write(reinterpret_cast<const char*>(&triangleCount), sizeof(triangleCount));
+
+  for (size_t i = 0; i < indices_.size(); i += 3) {
+    const glm::vec3 pa = vertices_[indices_[i + 0]].position * scale;
+    const glm::vec3 pb = vertices_[indices_[i + 1]].position * scale;
+    const glm::vec3 pc = vertices_[indices_[i + 2]].position * scale;
+    const glm::vec3 n = faceNormal(pa, pb, pc);
+
+    out.write(reinterpret_cast<const char*>(&n.x), sizeof(float));
+    out.write(reinterpret_cast<const char*>(&n.y), sizeof(float));
+    out.write(reinterpret_cast<const char*>(&n.z), sizeof(float));
+
+    out.write(reinterpret_cast<const char*>(&pa.x), sizeof(float));
+    out.write(reinterpret_cast<const char*>(&pa.y), sizeof(float));
+    out.write(reinterpret_cast<const char*>(&pa.z), sizeof(float));
+
+    out.write(reinterpret_cast<const char*>(&pb.x), sizeof(float));
+    out.write(reinterpret_cast<const char*>(&pb.y), sizeof(float));
+    out.write(reinterpret_cast<const char*>(&pb.z), sizeof(float));
+
+    out.write(reinterpret_cast<const char*>(&pc.x), sizeof(float));
+    out.write(reinterpret_cast<const char*>(&pc.y), sizeof(float));
+    out.write(reinterpret_cast<const char*>(&pc.z), sizeof(float));
+
+    const uint16_t attribute = 0;
+    out.write(reinterpret_cast<const char*>(&attribute), sizeof(attribute));
+  }
+
+  if (!out) {
+    error = "Write failed while exporting STL.";
+    return false;
+  }
+
+  return true;
+}
+
 bool StlMesh::empty() const { return vertices_.empty() || indices_.empty(); }
 
 const std::vector<StlVertex>& StlMesh::vertices() const { return vertices_; }

@@ -152,6 +152,7 @@ std::array<VkVertexInputAttributeDescription, 2> colorVertexAttributes() {
   attrs[1].offset = offsetof(ColorVertex, color);
   return attrs;
 }
+}  // namespace
 
 std::filesystem::path executableDir() {
 #ifdef __linux__
@@ -172,6 +173,7 @@ std::filesystem::path executableDir() {
   return {};
 }
 
+namespace {
 std::filesystem::path findShaderDir(std::string* diagnostic) {
   // Runtime search keeps binaries portable across dev/build/install layouts.
   const std::filesystem::path exeDir = executableDir();

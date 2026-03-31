@@ -14,6 +14,7 @@
 
 #include <imgui.h>
 
+#include "AppSettings.hpp"
 #include "CameraController.hpp"
 #include "ColorVertex.hpp"
 #include "Gizmo.hpp"
@@ -48,8 +49,11 @@ struct AppState {
   ExtrudeTool extrudeTool;
   Gizmo gizmo;
   Toolbar toolbar;
+  AppSettings appSettings;
   Project project;
   bool extrudeButtonPressed = false;  // set by toolbar, consumed by main loop
+  bool showAppSettings = false;
+  bool showProjectSettings = false;
 
   Sketch& activeSketch() { return sketches[static_cast<int>(activePlane)]; }
 
@@ -176,6 +180,7 @@ void drawMenuBar(AppState* app) {
       exitSketchMode(app);
       for (auto& s : app->sketches) { s.clear(); }
       app->extrudeTool.cancel();
+      app->project.initFromAppSettings(app->appSettings);
       app->status = "New scene";
     }
     if (ImGui::MenuItem("Open STL...")) {
@@ -203,11 +208,11 @@ void drawMenuBar(AppState* app) {
   }
 
   if (ImGui::BeginMenu("Settings")) {
-    const char* unitLabels[] = {"Millimeters", "Centimeters", "Meters", "Inches", "Feet"};
-    for (int i = 0; i < 5; ++i) {
-      if (ImGui::MenuItem(unitLabels[i], nullptr, static_cast<int>(app->project.defaultUnit) == i)) {
-        app->project.defaultUnit = static_cast<Unit>(i);
-      }
+    if (ImGui::MenuItem("Application Settings...")) {
+      app->showAppSettings = true;
+    }
+    if (ImGui::MenuItem("Project Settings...")) {
+      app->showProjectSettings = true;
     }
     ImGui::EndMenu();
   }
@@ -280,6 +285,68 @@ void drawPanel(AppState* app) {
   ImGui::TextWrapped("Status: %s", app->status.c_str());
   ImGui::End();
 }
+
+// Helper to draw a unit combo box.  Returns true if the value changed.
+bool unitCombo(const char* label, Unit* unit) {
+  bool changed = false;
+  int current = static_cast<int>(*unit);
+  if (ImGui::Combo(label, &current,
+                   "Millimeters (mm)\0Centimeters (cm)\0Meters (m)\0Inches (in)\0Feet (ft)\0")) {
+    if (current != static_cast<int>(*unit)) {
+      *unit = static_cast<Unit>(current);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+void drawAppSettingsWindow(AppState* app) {
+  if (!app->showAppSettings) return;
+
+  ImGui::SetNextWindowSize(ImVec2(360, 0), ImGuiCond_FirstUseEver);
+  if (ImGui::Begin("Application Settings", &app->showAppSettings)) {
+    ImGui::TextWrapped("These defaults apply to new projects.");
+    ImGui::Separator();
+
+    unitCombo("Default Unit", &app->appSettings.defaultUnit);
+    unitCombo("Export Unit", &app->appSettings.exportUnit);
+    ImGui::DragFloat("Grid Spacing (mm)", &app->appSettings.gridSpacing, 1.0f, 1.0f, 1000.0f);
+    ImGui::DragFloat("Grid Extent (mm)", &app->appSettings.gridExtent, 10.0f, 10.0f, 10000.0f);
+
+    ImGui::Separator();
+    if (ImGui::Button("Save")) {
+      if (app->appSettings.save()) {
+        app->status = "Application settings saved";
+      } else {
+        app->status = "Failed to save settings";
+      }
+    }
+  }
+  ImGui::End();
+}
+
+void drawProjectSettingsWindow(AppState* app) {
+  if (!app->showProjectSettings) return;
+
+  ImGui::SetNextWindowSize(ImVec2(360, 0), ImGuiCond_FirstUseEver);
+  if (ImGui::Begin("Project Settings", &app->showProjectSettings)) {
+    ImGui::TextWrapped("Settings for the current project.");
+    ImGui::Separator();
+
+    unitCombo("Default Unit", &app->project.defaultUnit);
+    unitCombo("Export Unit", &app->project.exportUnit);
+    ImGui::DragFloat("Grid Spacing (mm)", &app->project.gridSpacing, 1.0f, 1.0f, 1000.0f);
+    ImGui::DragFloat("Grid Extent (mm)", &app->project.gridExtent, 10.0f, 10.0f, 10000.0f);
+
+    ImGui::Separator();
+    if (ImGui::Button("Reset from App Defaults")) {
+      app->project.initFromAppSettings(app->appSettings);
+      app->status = "Project settings reset from app defaults";
+    }
+  }
+  ImGui::End();
+}
+
 }  // namespace
 
 int main() {
@@ -309,6 +376,9 @@ int main() {
     glfwTerminate();
     return 1;
   }
+
+  app.appSettings.load();  // load saved app settings (no-op if file missing)
+  app.project.initFromAppSettings(app.appSettings);
 
   app.sceneObjects.push_back(StlMesh::makeUnitCube());
   rebuildCombinedMesh(&app);
@@ -571,7 +641,7 @@ int main() {
     app.gizmo.appendLines(allLines);
 
     if (app.sceneMode == SceneMode::Sketch) {
-      appendGrid(allLines, app.activePlane, 100.0f, 10.0f);
+      appendGrid(allLines, app.activePlane, app.project.gridExtent, app.project.gridSpacing);
       app.activeSketch().appendLines(allLines, app.activePlane);
       app.sketchTool.appendPreview(allLines, app.activePlane);
     }
@@ -602,6 +672,8 @@ int main() {
     app.renderer.setLines(allLines);
 
     drawPanel(&app);
+    drawAppSettingsWindow(&app);
+    drawProjectSettingsWindow(&app);
 
     // --- File browser (modal — drawn every frame while visible) ---
     if (app.fileBrowser.isVisible()) {
@@ -640,8 +712,10 @@ int main() {
             path += ".stl";
           }
           std::string err;
-          if (app.sceneObjects[app.selectedObject].saveAsBinary(path, err)) {
-            app.status = "Exported " + path;
+          // Scale from internal mm to the project's export unit.
+          const float scale = fromMm(1.0f, app.project.exportUnit);
+          if (app.sceneObjects[app.selectedObject].saveAsBinaryScaled(path, scale, err)) {
+            app.status = "Exported " + path + " (" + unitSuffix(app.project.exportUnit) + ")";
           } else {
             app.status = "Export failed: " + err;
           }
