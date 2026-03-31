@@ -828,32 +828,51 @@ void drawObjectBrowserWindow(AppState* app) {
   const bool multiSelect = ImGui::GetIO().KeyCtrl;
 
   if (ImGui::CollapsingHeader("Objects", ImGuiTreeNodeFlags_DefaultOpen)) {
-    ImGui::TextDisabled("V  L  Name");
-    for (int i = 0; i < static_cast<int>(app->sceneObjects.size()); ++i) {
-      auto& meta = app->sceneObjectMeta[i];
-      ImGui::PushID(i);
+    if (ImGui::BeginTable("##objectsTable", 3,
+                          ImGuiTableFlags_RowBg |
+                              ImGuiTableFlags_BordersInnerV |
+                              ImGuiTableFlags_SizingStretchProp)) {
+      ImGui::TableSetupColumn("V", ImGuiTableColumnFlags_WidthFixed, 24.0f);
+      ImGui::TableSetupColumn("L", ImGuiTableColumnFlags_WidthFixed, 24.0f);
+      ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableHeadersRow();
 
-      if (ImGui::Checkbox("##objvis", &meta.visible)) {
-        rebuildCombinedMesh(app);
-      }
-      ImGui::SameLine();
-      ImGui::Checkbox("##objlock", &meta.locked);
-      ImGui::SameLine();
+      for (int i = 0; i < static_cast<int>(app->sceneObjects.size()); ++i) {
+        auto& meta = app->sceneObjectMeta[i];
+        const bool selected = hasIndex(app->browserSelectedObjects, i);
+        const bool renameInline = selected && app->browserSelectedObjects.size() == 1;
 
-      const bool selected = hasIndex(app->browserSelectedObjects, i);
-      if (ImGui::Selectable("##objsel", selected, 0, ImVec2(18.0f, 0.0f))) {
-        setSingleOrMultiSelection(app->browserSelectedObjects, i, multiSelect);
-        syncSelectedObjectFromBrowser(app);
-      }
-      ImGui::SameLine();
-      ImGui::SetNextItemWidth(-1.0f);
-      ImGui::InputText("##objname", meta.name.data(), meta.name.size());
-      if (ImGui::IsItemActivated() || ImGui::IsItemClicked()) {
-        setSingleOrMultiSelection(app->browserSelectedObjects, i, multiSelect);
-        syncSelectedObjectFromBrowser(app);
+        ImGui::TableNextRow();
+        ImGui::PushID(i);
+
+        ImGui::TableSetColumnIndex(0);
+        if (ImGui::Checkbox("##objvis", &meta.visible)) {
+          rebuildCombinedMesh(app);
+        }
+
+        ImGui::TableSetColumnIndex(1);
+        ImGui::Checkbox("##objlock", &meta.locked);
+
+        ImGui::TableSetColumnIndex(2);
+        if (renameInline) {
+          ImGui::SetNextItemWidth(-1.0f);
+          ImGui::InputText("##objname", meta.name.data(), meta.name.size());
+          if (ImGui::IsItemActivated() || ImGui::IsItemClicked()) {
+            setSingleOrMultiSelection(app->browserSelectedObjects, i, multiSelect);
+            syncSelectedObjectFromBrowser(app);
+          }
+        } else {
+          if (ImGui::Selectable(meta.name.data(), selected,
+                                ImGuiSelectableFlags_SpanAllColumns)) {
+            setSingleOrMultiSelection(app->browserSelectedObjects, i, multiSelect);
+            syncSelectedObjectFromBrowser(app);
+          }
+        }
+
+        ImGui::PopID();
       }
 
-      ImGui::PopID();
+      ImGui::EndTable();
     }
     if (app->sceneObjects.empty()) {
       ImGui::TextDisabled("(no objects)");
@@ -861,48 +880,67 @@ void drawObjectBrowserWindow(AppState* app) {
   }
 
   if (ImGui::CollapsingHeader("Sketches", ImGuiTreeNodeFlags_DefaultOpen)) {
-    ImGui::TextDisabled("V  L  Name");
-    for (int i = 0; i < 3; ++i) {
-      auto& meta = app->sketchMeta[i];
-      ImGui::PushID(1000 + i);
+    if (ImGui::BeginTable("##sketchesTable", 3,
+                          ImGuiTableFlags_RowBg |
+                              ImGuiTableFlags_BordersInnerV |
+                              ImGuiTableFlags_SizingStretchProp)) {
+      ImGui::TableSetupColumn("V", ImGuiTableColumnFlags_WidthFixed, 24.0f);
+      ImGui::TableSetupColumn("L", ImGuiTableColumnFlags_WidthFixed, 24.0f);
+      ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableHeadersRow();
 
-      const bool changedVisibility = ImGui::Checkbox("##skvis", &meta.visible);
-      ImGui::SameLine();
-      const bool changedLock = ImGui::Checkbox("##sklock", &meta.locked);
-      ImGui::SameLine();
+      for (int i = 0; i < 3; ++i) {
+        auto& meta = app->sketchMeta[i];
+        const bool selected = hasIndex(app->browserSelectedSketches, i);
+        const bool renameInline = selected && app->browserSelectedSketches.size() == 1;
 
-      const bool selected = hasIndex(app->browserSelectedSketches, i);
-      if (ImGui::Selectable("##sksel", selected, 0, ImVec2(18.0f, 0.0f))) {
-        setSingleOrMultiSelection(app->browserSelectedSketches, i, multiSelect);
-        if (app->browserSelectedSketches.size() == 1) {
-          app->activePlane = static_cast<SketchPlane>(app->browserSelectedSketches[0]);
+        ImGui::TableNextRow();
+        ImGui::PushID(1000 + i);
+
+        ImGui::TableSetColumnIndex(0);
+        const bool changedVisibility = ImGui::Checkbox("##skvis", &meta.visible);
+
+        ImGui::TableSetColumnIndex(1);
+        const bool changedLock = ImGui::Checkbox("##sklock", &meta.locked);
+
+        ImGui::TableSetColumnIndex(2);
+        if (renameInline) {
+          ImGui::SetNextItemWidth(-1.0f);
+          ImGui::InputText("##skname", meta.name.data(), meta.name.size());
+          if (ImGui::IsItemActivated() || ImGui::IsItemClicked()) {
+            setSingleOrMultiSelection(app->browserSelectedSketches, i, multiSelect);
+            if (app->browserSelectedSketches.size() == 1) {
+              app->activePlane = static_cast<SketchPlane>(app->browserSelectedSketches[0]);
+            }
+          }
+        } else {
+          if (ImGui::Selectable(meta.name.data(), selected,
+                                ImGuiSelectableFlags_SpanAllColumns)) {
+            setSingleOrMultiSelection(app->browserSelectedSketches, i, multiSelect);
+            if (app->browserSelectedSketches.size() == 1) {
+              app->activePlane = static_cast<SketchPlane>(app->browserSelectedSketches[0]);
+            }
+          }
         }
-      }
-      ImGui::SameLine();
-      ImGui::SetNextItemWidth(-1.0f);
-      ImGui::InputText("##skname", meta.name.data(), meta.name.size());
-      if (ImGui::IsItemActivated() || ImGui::IsItemClicked()) {
-        setSingleOrMultiSelection(app->browserSelectedSketches, i, multiSelect);
-        if (app->browserSelectedSketches.size() == 1) {
-          app->activePlane = static_cast<SketchPlane>(app->browserSelectedSketches[0]);
+
+        if ((changedVisibility || changedLock) &&
+            app->activePlane == static_cast<SketchPlane>(i) &&
+            (!meta.visible || meta.locked)) {
+          app->sketchTool.cancel();
+          app->sketchTool.setTool(Tool::None);
+          app->extrudeTool.cancel();
+          app->activeSketch().clearSelection();
         }
+
+        ImGui::PopID();
       }
 
-      if ((changedVisibility || changedLock) &&
-          app->activePlane == static_cast<SketchPlane>(i) &&
-          (!meta.visible || meta.locked)) {
-        app->sketchTool.cancel();
-        app->sketchTool.setTool(Tool::None);
-        app->extrudeTool.cancel();
-        app->activeSketch().clearSelection();
-      }
-
-      ImGui::PopID();
+      ImGui::EndTable();
     }
   }
 
   ImGui::Separator();
-  ImGui::TextDisabled("Left toggle: visible   Middle toggle: locked   Ctrl+click: multi-select");
+  ImGui::TextDisabled("Ctrl+click: multi-select");
   ImGui::End();
 }
 
