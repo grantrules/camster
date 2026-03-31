@@ -57,6 +57,7 @@ target_link_libraries(imgui PUBLIC glfw Vulkan::Vulkan)
 set(CAMSTER_SOURCES
   src/main.cpp
   src/AppSettings.cpp
+  src/core/AppLogic.cpp
   src/CameraController.cpp
   src/Gizmo.cpp
   src/History.cpp
@@ -68,6 +69,7 @@ set(CAMSTER_SOURCES
   src/sketch/Sketch.cpp
   src/sketch/SketchTool.cpp
   src/ui/FileBrowser.cpp
+  src/ui/UIWindows.cpp
   src/ui/Toolbar.cpp
     src/ui/PrintWindow.cpp
 )
