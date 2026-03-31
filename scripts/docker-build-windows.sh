@@ -2,10 +2,7 @@
 set -euo pipefail
 
 if ! docker info >/dev/null 2>&1; then
-  if [[ "${CAMSTER_DOCKER_GROUP_RETRY:-0}" != "1" ]] && command -v sg >/dev/null 2>&1; then
-    exec sg docker -c "CAMSTER_DOCKER_GROUP_RETRY=1 $0"
-  fi
-  echo "Docker daemon is not accessible for this shell. Try: sg docker -c '$0'" >&2
+  echo "Docker daemon is not accessible for this shell." >&2
   exit 1
 fi
 

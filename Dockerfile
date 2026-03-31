@@ -18,7 +18,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrandr-dev \
     ninja-build \
     pkg-config \
-    python3 \
     vulkan-tools \
     && rm -rf /var/lib/apt/lists/*
 

@@ -12,8 +12,6 @@ else()
 endif()
 
 find_package(Vulkan REQUIRED)
-find_package(Python3 COMPONENTS Interpreter REQUIRED)
-
 include(FetchContent)
 
 if(UNIX AND NOT APPLE AND NOT WIN32)
@@ -36,25 +34,11 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(glm)
 
 FetchContent_Declare(
-  nlohmann_json
-  GIT_REPOSITORY https://github.com/nlohmann/json.git
-  GIT_TAG v3.11.3
-)
-FetchContent_MakeAvailable(nlohmann_json)
-
-FetchContent_Declare(
   imgui
   GIT_REPOSITORY https://github.com/ocornut/imgui.git
   GIT_TAG v1.91.9b
 )
 FetchContent_MakeAvailable(imgui)
-
-FetchContent_Declare(
-  tinyfiledialogs
-  GIT_REPOSITORY https://github.com/native-toolkit/libtinyfiledialogs.git
-  GIT_TAG master
-)
-FetchContent_MakeAvailable(tinyfiledialogs)
 
 add_library(imgui STATIC
   ${imgui_SOURCE_DIR}/imgui.cpp
@@ -74,28 +58,24 @@ set(CAMSTER_SOURCES
   src/main.cpp
   src/CameraController.cpp
   src/StlMesh.cpp
-  src/PanelConfig.cpp
   src/VulkanRenderer.cpp
-  ${tinyfiledialogs_SOURCE_DIR}/tinyfiledialogs.c
+  src/ui/FileBrowser.cpp
 )
 
 add_executable(camster ${CAMSTER_SOURCES})
 
 target_include_directories(camster PRIVATE
   src
-  ${tinyfiledialogs_SOURCE_DIR}
 )
 
 target_link_libraries(camster PRIVATE
   glfw
   glm
-  nlohmann_json::nlohmann_json
   imgui
   Vulkan::Vulkan
 )
 
 target_compile_definitions(camster PRIVATE
-  CAMSTER_PYTHON_EXECUTABLE="${Python3_EXECUTABLE}"
   CAMSTER_ENABLE_VALIDATION=$<CONFIG:Debug>
 )
 
@@ -140,7 +120,6 @@ add_dependencies(camster shaders)
 install(TARGETS camster RUNTIME DESTINATION bin COMPONENT Runtime)
 install(FILES ${COMPILED_SHADERS} DESTINATION bin/shaders COMPONENT Runtime)
 install(FILES
-  assets/panel_config.py
   assets/sample_cube.stl
   DESTINATION bin/assets
   COMPONENT Runtime

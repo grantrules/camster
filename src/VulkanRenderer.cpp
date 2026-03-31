@@ -25,14 +25,20 @@
 #include "StlMesh.hpp"
 
 namespace {
+// Device extensions required by this renderer. Keep this list minimal and
+// additive so portability/debugging stay manageable.
 const std::vector<const char*> kRequiredDeviceExtensions = {
     VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 };
 
+// Validation layers are optional at runtime; they are enabled in debug builds
+// when available and silently disabled otherwise.
 const std::vector<const char*> kValidationLayers = {
     "VK_LAYER_KHRONOS_validation",
 };
 
+// VK_EXT_debug_utils functions are not loaded by default because they are
+// extension entry points.  We look them up manually via vkGetInstanceProcAddr.
 VkResult createDebugUtilsMessengerEXT(
     VkInstance instance, const VkDebugUtilsMessengerCreateInfoEXT* createInfo,
     const VkAllocationCallbacks* allocator, VkDebugUtilsMessengerEXT* messenger) {
@@ -54,6 +60,7 @@ void destroyDebugUtilsMessengerEXT(VkInstance instance, VkDebugUtilsMessengerEXT
 }
 
 VkSurfaceFormatKHR chooseSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& formats) {
+  // Prefer SRGB output when supported so colors authored in SRGB look correct.
   for (const auto& fmt : formats) {
     if (fmt.format == VK_FORMAT_B8G8R8A8_SRGB &&
         fmt.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
@@ -64,6 +71,8 @@ VkSurfaceFormatKHR chooseSurfaceFormat(const std::vector<VkSurfaceFormatKHR>& fo
 }
 
 VkPresentModeKHR choosePresentMode(const std::vector<VkPresentModeKHR>& modes) {
+  // MAILBOX gives low-latency triple-buffer behavior when available.
+  // FIFO is guaranteed by spec and acts like VSync fallback.
   for (const auto& mode : modes) {
     if (mode == VK_PRESENT_MODE_MAILBOX_KHR) {
       return mode;
@@ -73,6 +82,7 @@ VkPresentModeKHR choosePresentMode(const std::vector<VkPresentModeKHR>& modes) {
 }
 
 VkExtent2D chooseSwapExtent(GLFWwindow* window, const VkSurfaceCapabilitiesKHR& capabilities) {
+  // If the surface fixes the extent (common on some platforms), use it.
   if (capabilities.currentExtent.width != UINT32_MAX) {
     return capabilities.currentExtent;
   }
@@ -91,6 +101,9 @@ VkExtent2D chooseSwapExtent(GLFWwindow* window, const VkSurfaceCapabilitiesKHR& 
   return extent;
 }
 
+// Vertex input descriptions tell the pipeline how to interpret the raw byte
+// stream in a vertex buffer.  The binding describes stride (bytes per vertex),
+// and each attribute maps a shader input location to an offset inside that stride.
 VkVertexInputBindingDescription vertexBinding() {
   VkVertexInputBindingDescription desc{};
   desc.binding = 0;
@@ -128,6 +141,7 @@ std::filesystem::path executableDir() {
 }
 
 std::filesystem::path findShaderDir(std::string* diagnostic) {
+  // Runtime search keeps binaries portable across dev/build/install layouts.
   const std::filesystem::path exeDir = executableDir();
   const std::filesystem::path cwd = std::filesystem::current_path();
 
@@ -163,7 +177,15 @@ bool VulkanRenderer::QueueFamilyIndices::complete() const {
   return graphics != UINT32_MAX && present != UINT32_MAX;
 }
 
+VulkanRenderer::~VulkanRenderer() { cleanup(); }
+
 bool VulkanRenderer::initialize(GLFWwindow* window, std::string& error) {
+  // Initialization order tracks Vulkan object dependencies.
+  // A later step can assume all earlier prerequisites exist.
+  //
+  // Instance -> Surface -> PhysicalDevice -> LogicalDevice -> Swapchain
+  // -> ImageViews -> RenderPass -> Pipeline -> Buffers/Descriptors
+  // -> Command infrastructure -> Sync -> ImGui backend.
   window_ = window;
   validationEnabled_ = CAMSTER_ENABLE_VALIDATION != 0;
 
@@ -182,6 +204,8 @@ bool VulkanRenderer::initialize(GLFWwindow* window, std::string& error) {
   return true;
 }
 
+// Teardown in roughly reverse creation order.  Wait for the device to be idle
+// first so no in-flight work references objects we are about to destroy.
 void VulkanRenderer::cleanup() {
   if (device_ != VK_NULL_HANDLE) {
     vkDeviceWaitIdle(device_);
@@ -370,9 +394,12 @@ void VulkanRenderer::setMesh(const StlMesh& mesh) {
 
 bool VulkanRenderer::drawFrame(const glm::mat4& view, const glm::mat4& projection,
                                ImDrawData* drawData, std::string& error) {
+  // 1) CPU waits until this frame slot is no longer in use by the GPU.
+  //    This is the canonical "frames in flight" throttle.
   vkWaitForFences(device_, 1, &syncObjects_[currentFrame_].inFlight, VK_TRUE, UINT64_MAX);
 
   uint32_t imageIndex = 0;
+  // 2) Acquire a swapchain image and signal imageAvailable when ownership is ready.
   VkResult acquireResult = vkAcquireNextImageKHR(
       device_, swapchain_, UINT64_MAX, syncObjects_[currentFrame_].imageAvailable, VK_NULL_HANDLE,
       &imageIndex);
@@ -385,12 +412,17 @@ bool VulkanRenderer::drawFrame(const glm::mat4& view, const glm::mat4& projectio
     return false;
   }
 
+  // 3) Fence becomes unsignaled here and will be signaled by queue submit below.
   vkResetFences(device_, 1, &syncObjects_[currentFrame_].inFlight);
 
-  vkResetCommandBuffer(commandBuffers_[imageIndex], 0);
+  // 4) Command buffer is rebuilt every frame because camera/UI state changes.
+  //    Per-frame resources (command buffer, uniform buffer, descriptor set) are
+  //    indexed by currentFrame_, NOT imageIndex, so the fence wait above
+  //    guarantees they are no longer in use by the GPU.
+  vkResetCommandBuffer(commandBuffers_[currentFrame_], 0);
 
-  if (!updateUniformBuffer(imageIndex, view, projection, error) ||
-      !recordCommandBuffer(commandBuffers_[imageIndex], imageIndex, drawData, error)) {
+  if (!updateUniformBuffer(currentFrame_, view, projection, error) ||
+      !recordCommandBuffer(commandBuffers_[currentFrame_], imageIndex, drawData, error)) {
     return false;
   }
 
@@ -404,10 +436,13 @@ bool VulkanRenderer::drawFrame(const glm::mat4& view, const glm::mat4& projectio
   submitInfo.pWaitSemaphores = waitSemaphores;
   submitInfo.pWaitDstStageMask = waitStages;
   submitInfo.commandBufferCount = 1;
-  submitInfo.pCommandBuffers = &commandBuffers_[imageIndex];
+  submitInfo.pCommandBuffers = &commandBuffers_[currentFrame_];
   submitInfo.signalSemaphoreCount = 1;
   submitInfo.pSignalSemaphores = signalSemaphores;
 
+  // 5) Submit graphics work:
+  //    wait: imageAvailable at color-attachment stage
+  //    signal: renderFinished for presentation queue wait
   if (vkQueueSubmit(graphicsQueue_, 1, &submitInfo, syncObjects_[currentFrame_].inFlight) !=
       VK_SUCCESS) {
     error = "vkQueueSubmit failed.";
@@ -423,6 +458,7 @@ bool VulkanRenderer::drawFrame(const glm::mat4& view, const glm::mat4& projectio
   presentInfo.pSwapchains = swapchains;
   presentInfo.pImageIndices = &imageIndex;
 
+  // 6) Present waits on renderFinished so scanout never sees incomplete output.
   VkResult presentResult = vkQueuePresentKHR(presentQueue_, &presentInfo);
   if (presentResult == VK_ERROR_OUT_OF_DATE_KHR || presentResult == VK_SUBOPTIMAL_KHR ||
       framebufferResized_) {
@@ -454,6 +490,9 @@ bool VulkanRenderer::createInstance(std::string& error) {
 
   const std::vector<const char*> extensions = getRequiredExtensions();
 
+  // Chaining a debug messenger into pNext of the instance create info lets us
+  // catch validation errors that occur during vkCreateInstance itself (which is
+  // before the "real" debug messenger exists).
   VkDebugUtilsMessengerCreateInfoEXT debugCreateInfo{};
   if (validationEnabled_) {
     debugCreateInfo.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
@@ -640,6 +679,9 @@ bool VulkanRenderer::createSwapchain(std::string& error) {
   createInfo.imageArrayLayers = 1;
   createInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 
+  // If graphics and present queues are different families, images must be
+  // shared between them.  CONCURRENT is simpler but slightly less optimal than
+  // explicit ownership transfers with EXCLUSIVE.
   const uint32_t queueFamilyIndices[] = {queueFamilies_.graphics, queueFamilies_.present};
   if (queueFamilies_.graphics != queueFamilies_.present) {
     createInfo.imageSharingMode = VK_SHARING_MODE_CONCURRENT;
@@ -695,6 +737,9 @@ bool VulkanRenderer::createImageViews(std::string& error) {
 bool VulkanRenderer::createRenderPass(std::string& error) {
   depthFormat_ = findDepthFormat();
 
+  // Attachment 0: swapchain color target.
+  // UNDEFINED -> PRESENT is valid because we clear each frame and only care
+  // about final presentable image content.
   VkAttachmentDescription colorAttachment{};
   colorAttachment.format = swapchainFormat_;
   colorAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -709,6 +754,8 @@ bool VulkanRenderer::createRenderPass(std::string& error) {
   colorRef.attachment = 0;
   colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
+  // Attachment 1: depth buffer.
+  // Final layout remains depth-stencil optimal because it is not presented.
   VkAttachmentDescription depthAttachment{};
   depthAttachment.format = depthFormat_;
   depthAttachment.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -729,6 +776,9 @@ bool VulkanRenderer::createRenderPass(std::string& error) {
   subpass.pColorAttachments = &colorRef;
   subpass.pDepthStencilAttachment = &depthRef;
 
+  // External -> subpass dependency performs implicit layout/visibility sync for
+  // color and depth writes at the start of the render pass.
+  // See Vulkan spec chapter on render pass synchronization.
   VkSubpassDependency dependency{};
   dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
   dependency.dstSubpass = 0;
@@ -833,6 +883,9 @@ bool VulkanRenderer::createGraphicsPipeline(std::string& error) {
     return false;
   }
 
+  // This pipeline is mostly static-state for clarity.
+  // Dynamic states (viewport/scissor, etc.) can be introduced later once
+  // students are comfortable with baseline pipeline creation.
   VkPipelineShaderStageCreateInfo vertStage{};
   vertStage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
   vertStage.stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -879,6 +932,8 @@ bool VulkanRenderer::createGraphicsPipeline(std::string& error) {
   VkPipelineRasterizationStateCreateInfo raster{};
   raster.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
   raster.polygonMode = VK_POLYGON_MODE_FILL;
+  // Back-face culling assumes consistent CCW winding from mesh import.
+  // If imports contain mixed winding, this is one of the first knobs to inspect.
   raster.cullMode = VK_CULL_MODE_BACK_BIT;
   raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
   raster.lineWidth = 1.0f;
@@ -943,6 +998,9 @@ bool VulkanRenderer::createGraphicsPipeline(std::string& error) {
   }
 
   if (supportsWireframe_) {
+    // Optional second pipeline for wireframe mode.
+    // Vulkan exposes line rasterization through polygonMode=LINE, but support
+    // is feature-gated (fillModeNonSolid).
     VkPipelineRasterizationStateCreateInfo wireRaster = raster;
     wireRaster.polygonMode = VK_POLYGON_MODE_LINE;
     wireRaster.lineWidth = 1.0f;
@@ -1006,6 +1064,9 @@ bool VulkanRenderer::createCommandPool(std::string& error) {
   VkCommandPoolCreateInfo poolInfo{};
   poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
   poolInfo.queueFamilyIndex = queueFamilies_.graphics;
+  // RESET_COMMAND_BUFFER_BIT: we re-record individual command buffers each frame.
+  // TRANSIENT_BIT: hints the driver that buffers are short-lived, which may help
+  // internal allocation strategies on some implementations.
   poolInfo.flags =
       VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT | VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
 
@@ -1018,6 +1079,9 @@ bool VulkanRenderer::createCommandPool(std::string& error) {
 }
 
 uint32_t VulkanRenderer::findMemoryType(uint32_t typeFilter, VkMemoryPropertyFlags properties) const {
+  // Vulkan exposes memory heaps/types per physical device.
+  // typeFilter comes from resource memory requirements; we select a type that
+  // satisfies both compatibility bits and required property flags.
   VkPhysicalDeviceMemoryProperties memProps{};
   vkGetPhysicalDeviceMemoryProperties(physicalDevice_, &memProps);
 
@@ -1065,6 +1129,8 @@ bool VulkanRenderer::hasStencilComponent(VkFormat format) const {
 bool VulkanRenderer::createBuffer(VkDeviceSize size, VkBufferUsageFlags usage,
                                   VkMemoryPropertyFlags properties, Buffer& outBuffer,
                                   std::string& error) {
+  // Buffer object + explicit memory allocation are separate in Vulkan.
+  // This is deliberate: apps control placement trade-offs explicitly.
   VkBufferCreateInfo bufferInfo{};
   bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
   bufferInfo.size = size;
@@ -1181,6 +1247,8 @@ VkImageView VulkanRenderer::createImageView(VkImage image, VkFormat format,
 }
 
 bool VulkanRenderer::copyBuffer(VkBuffer src, VkBuffer dst, VkDeviceSize size, std::string& error) {
+  // One-time submit helper used for staging transfers.
+  // Simplicity over throughput: queue idle wait is acceptable at mesh-load time.
   VkCommandBufferAllocateInfo allocInfo{};
   allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
   allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
@@ -1249,7 +1317,7 @@ void VulkanRenderer::destroyImage(Image& image) {
 }
 
 bool VulkanRenderer::createUniformBuffers(std::string& error) {
-  uniformBuffers_.resize(swapchainImages_.size());
+  uniformBuffers_.resize(kFramesInFlight);
   for (auto& ub : uniformBuffers_) {
     if (!createBuffer(sizeof(UniformBufferObject), VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, ub,
@@ -1261,6 +1329,9 @@ bool VulkanRenderer::createUniformBuffers(std::string& error) {
 }
 
 bool VulkanRenderer::createDescriptorPool(std::string& error) {
+  // Shared descriptor pool for both app descriptors and ImGui descriptors.
+  // The generous counts avoid pool fragmentation/reallocation complexity in
+  // this teaching codebase.
   std::array<VkDescriptorPoolSize, 11> poolSizes{};
   poolSizes[0] = {VK_DESCRIPTOR_TYPE_SAMPLER, 1024};
   poolSizes[1] = {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1024};
@@ -1295,7 +1366,7 @@ bool VulkanRenderer::createDescriptorSets(std::string& error) {
                          descriptorSets_.data());
   }
 
-  std::vector<VkDescriptorSetLayout> layouts(swapchainImages_.size(), descriptorSetLayout_);
+  std::vector<VkDescriptorSetLayout> layouts(kFramesInFlight, descriptorSetLayout_);
 
   VkDescriptorSetAllocateInfo allocInfo{};
   allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
@@ -1303,7 +1374,7 @@ bool VulkanRenderer::createDescriptorSets(std::string& error) {
   allocInfo.descriptorSetCount = static_cast<uint32_t>(layouts.size());
   allocInfo.pSetLayouts = layouts.data();
 
-  descriptorSets_.resize(swapchainImages_.size());
+  descriptorSets_.resize(kFramesInFlight);
   if (vkAllocateDescriptorSets(device_, &allocInfo, descriptorSets_.data()) != VK_SUCCESS) {
     error = "vkAllocateDescriptorSets failed.";
     return false;
@@ -1335,7 +1406,7 @@ bool VulkanRenderer::createCommandBuffers(std::string& error) {
                          commandBuffers_.data());
   }
 
-  commandBuffers_.resize(swapchainImages_.size());
+  commandBuffers_.resize(kFramesInFlight);
 
   VkCommandBufferAllocateInfo allocInfo{};
   allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -1357,6 +1428,8 @@ bool VulkanRenderer::createSyncObjects(std::string& error) {
   VkSemaphoreCreateInfo semInfo{};
   semInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
 
+  // Fences start signaled so the very first vkWaitForFences in drawFrame()
+  // returns immediately rather than blocking forever.
   VkFenceCreateInfo fenceInfo{};
   fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
   fenceInfo.flags = VK_FENCE_CREATE_SIGNALED_BIT;
@@ -1385,6 +1458,13 @@ bool VulkanRenderer::uploadMeshBuffers(const StlMesh& mesh, std::string& error) 
   const VkDeviceSize vertexSize = sizeof(StlVertex) * mesh.vertices().size();
   const VkDeviceSize indexSize = sizeof(uint32_t) * mesh.indices().size();
 
+  // Classic staging pattern:
+  // 1) HOST_VISIBLE staging buffer (CPU writes)
+  // 2) DEVICE_LOCAL vertex/index buffer (GPU-optimal)
+  // 3) vkCmdCopyBuffer transfer
+  //
+  // Reference:
+  // https://registry.khronos.org/vulkan/specs/1.3-extensions/html/chap11.html
   Buffer vertexStaging;
   if (!createBuffer(vertexSize, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
                     VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
@@ -1435,10 +1515,10 @@ bool VulkanRenderer::uploadMeshBuffers(const StlMesh& mesh, std::string& error) 
   return true;
 }
 
-bool VulkanRenderer::updateUniformBuffer(uint32_t imageIndex, const glm::mat4& view,
+bool VulkanRenderer::updateUniformBuffer(uint32_t frameIndex, const glm::mat4& view,
                                          const glm::mat4& projection, std::string& error) {
-  if (imageIndex >= uniformBuffers_.size()) {
-    error = "Uniform buffer image index out of bounds.";
+  if (frameIndex >= uniformBuffers_.size()) {
+    error = "Uniform buffer frame index out of bounds.";
     return false;
   }
 
@@ -1449,15 +1529,19 @@ bool VulkanRenderer::updateUniformBuffer(uint32_t imageIndex, const glm::mat4& v
   ubo.options = glm::vec4(normalVisualizationEnabled_ ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
 
   void* mapped = nullptr;
-  vkMapMemory(device_, uniformBuffers_[imageIndex].memory, 0, sizeof(ubo), 0, &mapped);
+  vkMapMemory(device_, uniformBuffers_[frameIndex].memory, 0, sizeof(ubo), 0, &mapped);
   std::memcpy(mapped, &ubo, sizeof(ubo));
-  vkUnmapMemory(device_, uniformBuffers_[imageIndex].memory);
+  vkUnmapMemory(device_, uniformBuffers_[frameIndex].memory);
 
   return true;
 }
 
 bool VulkanRenderer::recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex,
                                          ImDrawData* drawData, std::string& error) {
+  // Command buffers in Vulkan are explicit command streams.
+  // We record one primary CB per frame-in-flight every frame.  The framebuffer
+  // is selected by imageIndex (which swapchain image we acquired), while the CB
+  // itself is indexed by currentFrame_ and protected by its matching fence.
   VkCommandBufferBeginInfo beginInfo{};
   beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
   if (vkBeginCommandBuffer(cmd, &beginInfo) != VK_SUCCESS) {
@@ -1492,8 +1576,9 @@ bool VulkanRenderer::recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageInde
     vkCmdBindVertexBuffers(cmd, 0, 1, buffers, offsets);
     vkCmdBindIndexBuffer(cmd, indexBuffer_.buffer, 0, VK_INDEX_TYPE_UINT32);
 
+    // Descriptor set is indexed by currentFrame_ to match per-frame UBOs.
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 1,
-                            &descriptorSets_[imageIndex], 0, nullptr);
+                            &descriptorSets_[currentFrame_], 0, nullptr);
 
     vkCmdDrawIndexed(cmd, indexCount_, 1, 0, 0, 0);
   }
@@ -1536,6 +1621,9 @@ bool VulkanRenderer::initImGui(std::string& error) {
 }
 
 bool VulkanRenderer::initImGuiVulkanBackend(std::string& error) {
+  // ImGui backend consumes our existing Vulkan objects (device, queue, render
+  // pass, descriptor pool) and records draw commands into our command buffers.
+  // Backend docs: https://github.com/ocornut/imgui/tree/master/backends
   ImGui_ImplVulkan_InitInfo initInfo{};
   initInfo.Instance = instance_;
   initInfo.PhysicalDevice = physicalDevice_;
@@ -1566,6 +1654,10 @@ bool VulkanRenderer::initImGuiVulkanBackend(std::string& error) {
   return true;
 }
 
+// Destroy everything that depends on swapchain dimensions: framebuffers, depth
+// image, pipelines (baked viewport/scissor), render pass, image views, and the
+// swapchain itself.  Per-frame resources (UBOs, descriptor sets, command
+// buffers, sync objects) are independent and survive.
 void VulkanRenderer::cleanupSwapchain() {
   for (auto framebuffer : framebuffers_) {
     vkDestroyFramebuffer(device_, framebuffer, nullptr);
@@ -1606,6 +1698,8 @@ void VulkanRenderer::cleanupSwapchain() {
 }
 
 bool VulkanRenderer::recreateSwapchain(std::string& error) {
+  // Minimized windows can report zero framebuffer dimensions.
+  // Waiting avoids creating invalid zero-sized swapchain resources.
   int width = 0;
   int height = 0;
   glfwGetFramebufferSize(window_, &width, &height);
@@ -1614,18 +1708,18 @@ bool VulkanRenderer::recreateSwapchain(std::string& error) {
     glfwWaitEvents();
   }
 
+  // Full-device idle keeps swapchain teardown/rebuild simple and correct.
+  // Fine-grained overlap is possible but not needed for this project baseline.
   vkDeviceWaitIdle(device_);
 
   cleanupSwapchain();
 
-  for (auto& ub : uniformBuffers_) {
-    destroyBuffer(ub);
-  }
-  uniformBuffers_.clear();
+  // Per-frame resources (uniform buffers, descriptor sets, command buffers)
+  // are sized to kFramesInFlight and do not depend on swapchain image count,
+  // so they survive swapchain recreation unchanged.
 
   if (!createSwapchain(error) || !createImageViews(error) || !createRenderPass(error) ||
-      !createGraphicsPipeline(error) || !createDepthResources(error) || !createFramebuffers(error) ||
-      !createUniformBuffers(error) || !createDescriptorSets(error) || !createCommandBuffers(error)) {
+      !createGraphicsPipeline(error) || !createDepthResources(error) || !createFramebuffers(error)) {
     return false;
   }
 

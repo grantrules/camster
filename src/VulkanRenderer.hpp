@@ -13,8 +13,27 @@ struct GLFWwindow;
 struct ImDrawData;
 class StlMesh;
 
+// VulkanRenderer owns the complete Vulkan state machine for this app:
+// instance/device/swapchain/pipeline/synchronization, plus ImGui integration.
+//
+// Design note for students:
+// - The public API is intentionally small (initialize, drawFrame, setMesh, etc.).
+// - Most learning value is in private helpers that mirror Vulkan object lifetimes.
+// - This follows the "explicit ownership" style encouraged by Vulkan itself.
+//
+// Recommended reading:
+// https://registry.khronos.org/vulkan/specs/1.3-extensions/html/
+// https://vulkan-tutorial.com/
 class VulkanRenderer {
  public:
+  ~VulkanRenderer();
+
+  VulkanRenderer() = default;
+  VulkanRenderer(const VulkanRenderer&) = delete;
+  VulkanRenderer& operator=(const VulkanRenderer&) = delete;
+  VulkanRenderer(VulkanRenderer&&) = delete;
+  VulkanRenderer& operator=(VulkanRenderer&&) = delete;
+
   bool initialize(GLFWwindow* window, std::string& error);
   void cleanup();
 
@@ -35,18 +54,22 @@ class VulkanRenderer {
   float framebufferAspect() const;
 
  private:
+  // CPU-side handles for GPU buffer allocations.
   struct Buffer {
     VkBuffer buffer = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkDeviceSize size = 0;
   };
 
+  // Image resource + memory + view bundled together for simpler ownership.
   struct Image {
     VkImage image = VK_NULL_HANDLE;
     VkDeviceMemory memory = VK_NULL_HANDLE;
     VkImageView view = VK_NULL_HANDLE;
   };
 
+  // Queue families are selected during physical-device suitability checks.
+  // graphics: command recording/submit queue, present: swapchain present queue.
   struct QueueFamilyIndices {
     uint32_t graphics = UINT32_MAX;
     uint32_t present = UINT32_MAX;
@@ -54,12 +77,18 @@ class VulkanRenderer {
     bool complete() const;
   };
 
+  // Per-frame synchronization primitives for "frames in flight":
+  // imageAvailable -> GPU can render to acquired image
+  // renderFinished -> presentation waits until rendering completes
+  // inFlight -> CPU throttle so we do not overwrite in-use frame resources
   struct FrameSync {
     VkSemaphore imageAvailable = VK_NULL_HANDLE;
     VkSemaphore renderFinished = VK_NULL_HANDLE;
     VkFence inFlight = VK_NULL_HANDLE;
   };
 
+  // Matches uniform block layout used by mesh shaders.
+  // options.x currently toggles normals visualization in the fragment shader.
   struct UniformBufferObject {
     glm::mat4 model;
     glm::mat4 view;
@@ -107,7 +136,7 @@ class VulkanRenderer {
   bool hasStencilComponent(VkFormat format) const;
 
   bool uploadMeshBuffers(const StlMesh& mesh, std::string& error);
-  bool updateUniformBuffer(uint32_t imageIndex, const glm::mat4& view, const glm::mat4& projection,
+  bool updateUniformBuffer(uint32_t frameIndex, const glm::mat4& view, const glm::mat4& projection,
                            std::string& error);
   bool recordCommandBuffer(VkCommandBuffer cmd, uint32_t imageIndex, ImDrawData* drawData,
                            std::string& error);
@@ -162,6 +191,8 @@ class VulkanRenderer {
   VkCommandPool commandPool_ = VK_NULL_HANDLE;
   std::vector<VkCommandBuffer> commandBuffers_;
 
+  // This app uses double-buffered CPU frame pacing.
+  // It is independent from swapchain image count.
   static constexpr size_t kFramesInFlight = 2;
   std::vector<FrameSync> syncObjects_;
   size_t currentFrame_ = 0;

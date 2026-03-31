@@ -7,6 +7,7 @@
 #include <glm/ext/matrix_transform.hpp>
 
 namespace {
+// Pitch limits prevent the camera from flipping upside-down at the poles.
 constexpr float kMinPitch = -1.5f;
 constexpr float kMaxPitch = 1.5f;
 constexpr float kMinDistance = 0.2f;
@@ -35,6 +36,8 @@ void CameraController::rotateTo(double x, double y) {
 void CameraController::endRotate() { rotating_ = false; }
 
 void CameraController::zoom(float wheelDelta) {
+  // Multiplicative zoom feels more natural than additive: small scrolls near
+  // the model give fine control, large scrolls far away cover ground quickly.
   distance_ *= (1.0f - wheelDelta * 0.1f);
   distance_ = std::clamp(distance_, kMinDistance, kMaxDistance);
 }
@@ -79,6 +82,8 @@ glm::mat4 CameraController::viewMatrix() const {
 }
 
 glm::mat4 CameraController::projectionMatrix(float aspect) const {
+  // Vulkan clip space has Y pointing downward (opposite of OpenGL).  Flipping
+  // proj[1][1] corrects for this so the scene isn't rendered upside-down.
   glm::mat4 proj = glm::perspective(glm::radians(45.0f), aspect, 0.01f, 2000.0f);
   proj[1][1] *= -1.0f;
   return proj;

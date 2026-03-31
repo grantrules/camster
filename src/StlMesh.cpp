@@ -51,6 +51,8 @@ glm::vec3 faceNormal(const glm::vec3& a, const glm::vec3& b, const glm::vec3& c)
   return glm::normalize(n);
 }
 
+// Safe little-endian read via memcpy (avoids undefined behavior from
+// misaligned type-punned pointer casts).
 template <typename T>
 T readLE(const uint8_t* bytes) {
   T value{};
@@ -87,6 +89,9 @@ bool StlMesh::loadFromFile(const std::string& path, std::string& error) {
     return false;
   }
 
+  // Binary STL heuristic: a valid binary file has an 80-byte header followed
+  // by a 4-byte triangle count, then exactly (count * 50) bytes of triangle
+  // data.  If the total size matches, treat it as binary; otherwise try ASCII.
   bool isBinary = false;
   if (bytes.size() >= 84) {
     const uint32_t triangles = readLE<uint32_t>(bytes.data() + 80);

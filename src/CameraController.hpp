@@ -4,6 +4,9 @@
 #include <glm/vec2.hpp>
 #include <glm/vec3.hpp>
 
+// Orbit camera that rotates around a target point using spherical coordinates
+// (yaw/pitch/distance).  Produces view and projection matrices consumed by the
+// renderer each frame.
 class CameraController {
  public:
   enum class Orientation {

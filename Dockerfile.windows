@@ -17,7 +17,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     mingw-w64-tools \
     ninja-build \
     pkg-config \
-    python3 \
     zip \
     && rm -rf /var/lib/apt/lists/*
 
