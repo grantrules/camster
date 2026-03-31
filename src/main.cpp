@@ -195,6 +195,7 @@ struct AppState {
   int activeSketchIndex = -1;
   int nextSketchNumber = 1;
   SketchCreateState sketchCreate;
+  std::optional<SketchPlane> hoveredPlaneIndicator;  // for gizmo hover feedback
   int partialSelectedObject = -1;
   int projectSourceSketchIndex = -1;
   bool showProjectTool = false;
@@ -2030,6 +2031,19 @@ int main() {
                              glfwGetKey(window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS);
 
       if (app.sketchCreate.open && app.sketchCreate.pickFromScene) {
+        // Update hover state for plane indicators.
+        {
+          int fbW = 0, fbH = 0;
+          glfwGetFramebufferSize(window, &fbW, &fbH);
+          const glm::mat4 view = app.camera.viewMatrix();
+          const glm::mat4 proj = app.camera.projectionMatrix(app.renderer.framebufferAspect());
+          glm::vec3 rayO, rayD;
+          screenToRay(static_cast<float>(x), static_cast<float>(y),
+                      static_cast<float>(fbW), static_cast<float>(fbH),
+                      view, proj, rayO, rayD);
+          app.hoveredPlaneIndicator = app.gizmo.rayHitsPlaneIndicator(rayO, rayD);
+        }
+
         if (leftDown && !app.wasLeftDown) {
           app.dragStartScreen = {static_cast<float>(x), static_cast<float>(y)};
         } else if (!leftDown && app.wasLeftDown) {
@@ -2053,31 +2067,46 @@ int main() {
               app.sketchCreate.pickFromScene = false;
               app.status = "Face selected for sketch plane";
             } else {
-              std::optional<glm::vec3> bestHit;
-              SketchPlane bestPlane = SketchPlane::XY;
-              float bestDist = std::numeric_limits<float>::max();
-              for (SketchPlane candidate : {SketchPlane::XY, SketchPlane::XZ, SketchPlane::YZ}) {
-                auto hit = rayPlaneHit(static_cast<float>(x), static_cast<float>(y),
-                                       static_cast<float>(fbW), static_cast<float>(fbH),
-                                       view, proj, candidate, 0.0f);
-                if (!hit) continue;
-                const float d = glm::length(*hit);
-                if (d < bestDist) {
-                  bestDist = d;
-                  bestHit = hit;
-                  bestPlane = candidate;
-                }
-              }
-              if (bestHit && bestDist <= 25.0f) {
+              // First, try to pick a plane indicator (gizmo).
+              if (auto planeHit = app.gizmo.rayHitsPlaneIndicator(rayO, rayD)) {
                 app.sketchCreate.fromFace = false;
                 app.sketchCreate.sourceObject = -1;
-                app.sketchCreate.plane = bestPlane;
+                app.sketchCreate.plane = *planeHit;
                 app.sketchCreate.offsetMm = 0.0f;
                 app.partialSelectedObject = -1;
                 app.sketchCreate.pickFromScene = false;
-                app.status = "Center plane selected for new sketch";
+                app.status = "Plane selected from gizmo";
+                app.hoveredPlaneIndicator.reset();
               } else {
-                app.status = "No face or center plane hit. Try clicking a visible face or near origin";
+                // Fall back to center plane picking.
+                std::optional<glm::vec3> bestHit;
+                SketchPlane bestPlane = SketchPlane::XY;
+                float bestDist = std::numeric_limits<float>::max();
+
+                for (SketchPlane candidate : {SketchPlane::XY, SketchPlane::XZ, SketchPlane::YZ}) {
+                  auto hit = rayPlaneHit(static_cast<float>(x), static_cast<float>(y),
+                                         static_cast<float>(fbW), static_cast<float>(fbH),
+                                         view, proj, candidate, 0.0f);
+                  if (!hit) continue;
+                  const float d = glm::length(*hit);
+                  if (d < bestDist) {
+                    bestDist = d;
+                    bestHit = hit;
+                    bestPlane = candidate;
+                  }
+                }
+                if (bestHit && bestDist <= 25.0f) {
+                  app.sketchCreate.fromFace = false;
+                  app.sketchCreate.sourceObject = -1;
+                  app.sketchCreate.plane = bestPlane;
+                  app.sketchCreate.offsetMm = 0.0f;
+                  app.partialSelectedObject = -1;
+                  app.sketchCreate.pickFromScene = false;
+                  app.status = "Center plane selected for new sketch";
+                } else {
+                  app.status = "No face or center plane hit. Try clicking a visible face or near origin";
+                }
+                app.hoveredPlaneIndicator.reset();
               }
             }
           }
@@ -2374,6 +2403,12 @@ int main() {
     std::vector<std::vector<glm::vec2>> filledProfiles;
     std::vector<glm::vec2> danglingPoints;
     app.gizmo.appendLines(allLines);
+
+    // Highlight hovered plane indicator during sketch creation.
+    if (app.sketchCreate.open && app.sketchCreate.pickFromScene &&
+        app.hoveredPlaneIndicator) {
+      app.gizmo.appendHighlightedPlane(allLines, *app.hoveredPlaneIndicator);
+    }
 
     if (app.sceneMode == SceneMode::Sketch && app.hasActiveSketch() && app.activeSketchVisible()) {
       appendGrid(allLines, app.activePlane(), app.project.gridExtent, app.project.gridSpacing);
