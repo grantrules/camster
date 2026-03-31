@@ -165,6 +165,8 @@ struct AppState {
   int nextObjectNumber = 1;
   std::vector<int> browserSelectedObjects;
   std::vector<int> browserSelectedSketches;
+  int renameObjectIndex = -1;
+  int renameSketchIndex = -1;
   ObjectPickMode objectPickMode = ObjectPickMode::None;
   ExtrudeOptionsState extrudeOptions;
   CombineOptionsState combineOptions;
@@ -208,12 +210,24 @@ struct AppState {
   bool loadingMesh = false;
 };
 
+const char* browserRowLabel(bool visible, bool locked) {
+  if (!visible && locked) return "[H][L]";
+  if (!visible) return "[H]";
+  if (locked) return "[L]";
+  return "";
+}
+
 void syncSelectedObjectFromBrowser(AppState* app) {
   sanitizeObjectIndices(app->browserSelectedObjects, static_cast<int>(app->sceneObjects.size()));
   if (app->browserSelectedObjects.empty()) {
     app->selectedObject = -1;
+    app->renameObjectIndex = -1;
   } else {
     app->selectedObject = app->browserSelectedObjects.front();
+    if (app->browserSelectedObjects.size() != 1 ||
+        !hasIndex(app->browserSelectedObjects, app->renameObjectIndex)) {
+      app->renameObjectIndex = -1;
+    }
   }
 }
 
@@ -242,6 +256,7 @@ void clearSceneObjects(AppState* app) {
   app->browserSelectedObjects.clear();
   app->selectedObject = -1;
   app->nextObjectNumber = 1;
+  app->renameObjectIndex = -1;
 }
 
 void framebufferResizeCallback(GLFWwindow* window, int, int) {
@@ -826,6 +841,18 @@ void drawObjectBrowserWindow(AppState* app) {
   ImGui::Begin("Object Browser");
 
   const bool multiSelect = ImGui::GetIO().KeyCtrl;
+  const auto tintRow = [](bool visible, bool locked) {
+    if (!visible && locked) {
+      return IM_COL32(90, 70, 40, 50);
+    }
+    if (!visible) {
+      return IM_COL32(70, 70, 70, 45);
+    }
+    if (locked) {
+      return IM_COL32(110, 90, 40, 40);
+    }
+    return IM_COL32(0, 0, 0, 0);
+  };
 
   if (ImGui::CollapsingHeader("Objects", ImGuiTreeNodeFlags_DefaultOpen)) {
     if (ImGui::BeginTable("##objectsTable", 3,
@@ -840,9 +867,15 @@ void drawObjectBrowserWindow(AppState* app) {
       for (int i = 0; i < static_cast<int>(app->sceneObjects.size()); ++i) {
         auto& meta = app->sceneObjectMeta[i];
         const bool selected = hasIndex(app->browserSelectedObjects, i);
-        const bool renameInline = selected && app->browserSelectedObjects.size() == 1;
+        const bool renameInline = app->renameObjectIndex == i &&
+                                  app->browserSelectedObjects.size() == 1 &&
+                                  selected;
 
         ImGui::TableNextRow();
+        const ImU32 rowTint = tintRow(meta.visible, meta.locked);
+        if (rowTint != 0) {
+          ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, rowTint);
+        }
         ImGui::PushID(i);
 
         ImGui::TableSetColumnIndex(0);
@@ -856,16 +889,29 @@ void drawObjectBrowserWindow(AppState* app) {
         ImGui::TableSetColumnIndex(2);
         if (renameInline) {
           ImGui::SetNextItemWidth(-1.0f);
-          ImGui::InputText("##objname", meta.name.data(), meta.name.size());
-          if (ImGui::IsItemActivated() || ImGui::IsItemClicked()) {
-            setSingleOrMultiSelection(app->browserSelectedObjects, i, multiSelect);
-            syncSelectedObjectFromBrowser(app);
+          const bool accepted = ImGui::InputText(
+              "##objname", meta.name.data(), meta.name.size(),
+              ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_EnterReturnsTrue);
+          if (ImGui::IsItemDeactivated() || accepted) {
+            app->renameObjectIndex = -1;
           }
         } else {
-          if (ImGui::Selectable(meta.name.data(), selected,
+          std::string label = meta.name.data();
+          const char* state = browserRowLabel(meta.visible, meta.locked);
+          if (state[0] != '\0') {
+            label += " ";
+            label += state;
+          }
+          if (ImGui::Selectable(label.c_str(), selected,
                                 ImGuiSelectableFlags_SpanAllColumns)) {
             setSingleOrMultiSelection(app->browserSelectedObjects, i, multiSelect);
             syncSelectedObjectFromBrowser(app);
+            app->renameObjectIndex = -1;
+          }
+          if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            app->browserSelectedObjects.assign(1, i);
+            syncSelectedObjectFromBrowser(app);
+            app->renameObjectIndex = i;
           }
         }
 
@@ -892,9 +938,15 @@ void drawObjectBrowserWindow(AppState* app) {
       for (int i = 0; i < 3; ++i) {
         auto& meta = app->sketchMeta[i];
         const bool selected = hasIndex(app->browserSelectedSketches, i);
-        const bool renameInline = selected && app->browserSelectedSketches.size() == 1;
+        const bool renameInline = app->renameSketchIndex == i &&
+                                  app->browserSelectedSketches.size() == 1 &&
+                                  selected;
 
         ImGui::TableNextRow();
+        const ImU32 rowTint = tintRow(meta.visible, meta.locked);
+        if (rowTint != 0) {
+          ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, rowTint);
+        }
         ImGui::PushID(1000 + i);
 
         ImGui::TableSetColumnIndex(0);
@@ -906,20 +958,31 @@ void drawObjectBrowserWindow(AppState* app) {
         ImGui::TableSetColumnIndex(2);
         if (renameInline) {
           ImGui::SetNextItemWidth(-1.0f);
-          ImGui::InputText("##skname", meta.name.data(), meta.name.size());
-          if (ImGui::IsItemActivated() || ImGui::IsItemClicked()) {
-            setSingleOrMultiSelection(app->browserSelectedSketches, i, multiSelect);
-            if (app->browserSelectedSketches.size() == 1) {
-              app->activePlane = static_cast<SketchPlane>(app->browserSelectedSketches[0]);
-            }
+          const bool accepted = ImGui::InputText(
+              "##skname", meta.name.data(), meta.name.size(),
+              ImGuiInputTextFlags_AutoSelectAll | ImGuiInputTextFlags_EnterReturnsTrue);
+          if (ImGui::IsItemDeactivated() || accepted) {
+            app->renameSketchIndex = -1;
           }
         } else {
-          if (ImGui::Selectable(meta.name.data(), selected,
+          std::string label = meta.name.data();
+          const char* state = browserRowLabel(meta.visible, meta.locked);
+          if (state[0] != '\0') {
+            label += " ";
+            label += state;
+          }
+          if (ImGui::Selectable(label.c_str(), selected,
                                 ImGuiSelectableFlags_SpanAllColumns)) {
             setSingleOrMultiSelection(app->browserSelectedSketches, i, multiSelect);
             if (app->browserSelectedSketches.size() == 1) {
               app->activePlane = static_cast<SketchPlane>(app->browserSelectedSketches[0]);
             }
+            app->renameSketchIndex = -1;
+          }
+          if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+            app->browserSelectedSketches.assign(1, i);
+            app->activePlane = static_cast<SketchPlane>(i);
+            app->renameSketchIndex = i;
           }
         }
 
