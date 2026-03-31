@@ -76,15 +76,6 @@ std::vector<std::array<size_t, 3>> earClip(const std::vector<glm::vec2>& poly) {
   return tris;
 }
 
-glm::vec3 planeNormal(SketchPlane plane) {
-  switch (plane) {
-    case SketchPlane::XY: return {0, 0, 1};
-    case SketchPlane::XZ: return {0, 1, 0};
-    case SketchPlane::YZ: return {1, 0, 0};
-  }
-  return {0, 0, 1};
-}
-
 }  // namespace
 
 StlMesh extrudeMesh(const std::vector<std::vector<glm::vec2>>& profiles,

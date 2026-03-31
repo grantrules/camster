@@ -14,6 +14,24 @@ enum class SceneMode { View3D, Sketch };
 // The three principal planes a sketch can live on.
 enum class SketchPlane { XY, XZ, YZ };
 
+inline glm::vec3 planeNormal(SketchPlane plane) {
+  switch (plane) {
+    case SketchPlane::XY: return {0.0f, 0.0f, 1.0f};
+    case SketchPlane::XZ: return {0.0f, 1.0f, 0.0f};
+    case SketchPlane::YZ: return {1.0f, 0.0f, 0.0f};
+  }
+  return {0.0f, 0.0f, 1.0f};
+}
+
+inline float planeAxisValue(glm::vec3 p, SketchPlane plane) {
+  switch (plane) {
+    case SketchPlane::XY: return p.z;
+    case SketchPlane::XZ: return p.y;
+    case SketchPlane::YZ: return p.x;
+  }
+  return 0.0f;
+}
+
 // ---------------------------------------------------------------------------
 // Interaction thresholds (in 2D plane units, i.e. mm)
 // ---------------------------------------------------------------------------
@@ -27,11 +45,11 @@ constexpr float kSnapIndicatorSize = 1.0f; // half-size of snap diamond indicato
 // ---------------------------------------------------------------------------
 
 // Map a 2D sketch coordinate to its 3D world position on the given plane.
-inline glm::vec3 toWorld(glm::vec2 p, SketchPlane plane) {
+inline glm::vec3 toWorld(glm::vec2 p, SketchPlane plane, float offsetMm = 0.0f) {
   switch (plane) {
-    case SketchPlane::XY: return {p.x, p.y, 0.0f};
-    case SketchPlane::XZ: return {p.x, 0.0f, p.y};
-    case SketchPlane::YZ: return {0.0f, p.x, p.y};
+    case SketchPlane::XY: return {p.x, p.y, offsetMm};
+    case SketchPlane::XZ: return {p.x, offsetMm, p.y};
+    case SketchPlane::YZ: return {offsetMm, p.x, p.y};
   }
   return {};
 }
@@ -57,7 +75,8 @@ inline std::optional<glm::vec3> rayPlaneHit(float screenX, float screenY,
                                             float viewportW, float viewportH,
                                             const glm::mat4& view,
                                             const glm::mat4& projection,
-                                            SketchPlane plane) {
+                                            SketchPlane plane,
+                                            float offsetMm = 0.0f) {
   // Screen → Vulkan NDC (Y-down in Vulkan, matching our flipped projection).
   const float ndcX = (2.0f * screenX / viewportW) - 1.0f;
   const float ndcY = (2.0f * screenY / viewportH) - 1.0f;
@@ -82,7 +101,7 @@ inline std::optional<glm::vec3> rayPlaneHit(float screenX, float screenY,
 
   if (std::abs(denom) < 1e-8f) return std::nullopt;
 
-  const float t = -originDist / denom;
+  const float t = (offsetMm - originDist) / denom;
   if (t < 0.0f) return std::nullopt;
 
   return origin + t * dir;

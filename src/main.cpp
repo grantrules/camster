@@ -89,6 +89,29 @@ struct SketchMetadata {
   bool locked = false;
 };
 
+struct SketchEntry {
+  Sketch sketch;
+  SketchMetadata meta;
+  SketchPlane plane = SketchPlane::XY;
+  float offsetMm = 0.0f;
+};
+
+struct SketchCreateState {
+  bool open = false;
+  bool pickFromScene = false;
+  SketchPlane plane = SketchPlane::XY;
+  float offsetMm = 0.0f;
+  bool fromFace = false;
+  int sourceObject = -1;
+};
+
+struct FacePickResult {
+  int objectIndex = -1;
+  int triangleOffset = -1;
+  glm::vec3 hitPoint{0.0f};
+  glm::vec3 normal{0.0f, 0.0f, 1.0f};
+};
+
 void addUniqueIndex(std::vector<int>& list, int idx) {
   if (idx < 0) return;
   if (std::find(list.begin(), list.end(), idx) == list.end()) {
@@ -185,9 +208,14 @@ struct AppState {
 
   // Scene / sketch state.
   SceneMode sceneMode = SceneMode::View3D;
-  SketchPlane activePlane = SketchPlane::XY;
-  Sketch sketches[3];  // one per SketchPlane
-  std::array<SketchMetadata, 3> sketchMeta;
+  std::vector<SketchEntry> sketches;
+  int activeSketchIndex = -1;
+  int nextSketchNumber = 1;
+  SketchCreateState sketchCreate;
+  int partialSelectedObject = -1;
+  int projectSourceSketchIndex = -1;
+  bool showProjectTool = false;
+  std::vector<bool> projectSelectionMask;
   SketchTool sketchTool;
   ExtrudeTool extrudeTool;
   Gizmo gizmo;
@@ -197,10 +225,21 @@ struct AppState {
   bool showAppSettings = false;
   bool showProjectSettings = false;
 
-  Sketch& activeSketch() { return sketches[static_cast<int>(activePlane)]; }
-  SketchMetadata& activeSketchMeta() { return sketchMeta[static_cast<int>(activePlane)]; }
-  bool activeSketchLocked() const { return sketchMeta[static_cast<int>(activePlane)].locked; }
-  bool activeSketchVisible() const { return sketchMeta[static_cast<int>(activePlane)].visible; }
+  bool hasActiveSketch() const {
+    return activeSketchIndex >= 0 && activeSketchIndex < static_cast<int>(sketches.size());
+  }
+  Sketch& activeSketch() { return sketches[activeSketchIndex].sketch; }
+  const Sketch& activeSketch() const { return sketches[activeSketchIndex].sketch; }
+  SketchMetadata& activeSketchMeta() { return sketches[activeSketchIndex].meta; }
+  const SketchMetadata& activeSketchMeta() const { return sketches[activeSketchIndex].meta; }
+  SketchPlane activePlane() const {
+    return hasActiveSketch() ? sketches[activeSketchIndex].plane : SketchPlane::XY;
+  }
+  float activePlaneOffset() const {
+    return hasActiveSketch() ? sketches[activeSketchIndex].offsetMm : 0.0f;
+  }
+  bool activeSketchLocked() const { return hasActiveSketch() && activeSketchMeta().locked; }
+  bool activeSketchVisible() const { return hasActiveSketch() && activeSketchMeta().visible; }
 
   std::string status = "Ready";
   bool dragging = false;
@@ -230,6 +269,7 @@ const char* browserRowLabel(bool visible, bool locked) {
 }
 
 void rebuildCombinedMesh(AppState* app);
+void snapCameraToPlane(AppState* app, SketchPlane plane);
 
 void syncSelectedObjectFromBrowser(AppState* app) {
   sanitizeObjectIndices(app->browserSelectedObjects, static_cast<int>(app->sceneObjects.size()));
@@ -246,13 +286,17 @@ void syncSelectedObjectFromBrowser(AppState* app) {
 }
 
 void syncSelectedSketchFromBrowser(AppState* app) {
-  sanitizeObjectIndices(app->browserSelectedSketches, static_cast<int>(app->sketchMeta.size()));
+  sanitizeObjectIndices(app->browserSelectedSketches, static_cast<int>(app->sketches.size()));
   if (app->browserSelectedSketches.empty()) {
     app->renameSketchIndex = -1;
     return;
   }
   if (app->browserSelectedSketches.size() == 1) {
-    app->activePlane = static_cast<SketchPlane>(app->browserSelectedSketches.front());
+    app->activeSketchIndex = app->browserSelectedSketches.front();
+    app->sceneMode = SceneMode::Sketch;
+    if (app->hasActiveSketch()) {
+      snapCameraToPlane(app, app->activePlane());
+    }
   }
   if (app->browserSelectedSketches.size() != 1 ||
       !hasIndex(app->browserSelectedSketches, app->renameSketchIndex)) {
@@ -260,14 +304,44 @@ void syncSelectedSketchFromBrowser(AppState* app) {
   }
 }
 
-void initializeSketchMetadata(AppState* app) {
-  setName(app->sketchMeta[0].name, "Sketch 1");
-  setName(app->sketchMeta[1].name, "Sketch 2");
-  setName(app->sketchMeta[2].name, "Sketch 3");
-  for (auto& meta : app->sketchMeta) {
-    meta.visible = true;
-    meta.locked = false;
+void clearSketches(AppState* app) {
+  app->sketches.clear();
+  app->activeSketchIndex = -1;
+  app->nextSketchNumber = 1;
+  app->browserSelectedSketches.clear();
+  app->sketchSelectionAnchor = -1;
+  app->renameSketchIndex = -1;
+  app->sketchTool.cancel();
+  app->sketchTool.setTool(Tool::None);
+  app->extrudeTool.cancel();
+  app->showProjectTool = false;
+  app->projectSelectionMask.clear();
+  app->projectSourceSketchIndex = -1;
+}
+
+void snapCameraToPlane(AppState* app, SketchPlane plane) {
+  switch (plane) {
+    case SketchPlane::XY: app->camera.snap(CameraController::Orientation::Front); break;
+    case SketchPlane::XZ: app->camera.snap(CameraController::Orientation::Top); break;
+    case SketchPlane::YZ: app->camera.snap(CameraController::Orientation::Right); break;
   }
+}
+
+void createSketch(AppState* app, SketchPlane plane, float offsetMm) {
+  SketchEntry entry;
+  setName(entry.meta.name, "Sketch " + std::to_string(app->nextSketchNumber++));
+  entry.meta.visible = true;
+  entry.meta.locked = false;
+  entry.plane = plane;
+  entry.offsetMm = offsetMm;
+  app->sketches.push_back(std::move(entry));
+  app->activeSketchIndex = static_cast<int>(app->sketches.size()) - 1;
+  app->browserSelectedSketches.assign(1, app->activeSketchIndex);
+  app->sketchSelectionAnchor = app->activeSketchIndex;
+  app->sceneMode = SceneMode::Sketch;
+  app->showProjectTool = true;
+  app->partialSelectedObject = -1;
+  snapCameraToPlane(app, plane);
 }
 
 void appendSceneObject(AppState* app, StlMesh mesh) {
@@ -306,10 +380,10 @@ void beginObjectRename(AppState* app, int idx) {
 }
 
 void beginSketchRename(AppState* app, int idx) {
-  if (idx < 0 || idx >= static_cast<int>(app->sketchMeta.size())) return;
+  if (idx < 0 || idx >= static_cast<int>(app->sketches.size())) return;
   app->renameSketchIndex = idx;
   app->renameObjectIndex = -1;
-  setName(app->renameBuffer, app->sketchMeta[idx].name.data());
+  setName(app->renameBuffer, app->sketches[idx].meta.name.data());
   app->focusRenameInput = true;
 }
 
@@ -325,11 +399,11 @@ void commitObjectRename(AppState* app) {
 
 void commitSketchRename(AppState* app) {
   if (app->renameSketchIndex < 0 ||
-      app->renameSketchIndex >= static_cast<int>(app->sketchMeta.size())) {
+      app->renameSketchIndex >= static_cast<int>(app->sketches.size())) {
     app->renameSketchIndex = -1;
     return;
   }
-  setName(app->sketchMeta[app->renameSketchIndex].name, app->renameBuffer.data());
+  setName(app->sketches[app->renameSketchIndex].meta.name, app->renameBuffer.data());
   app->renameSketchIndex = -1;
 }
 
@@ -722,6 +796,44 @@ int pickObject(const AppState& app, glm::vec3 rayO, glm::vec3 rayD) {
   return bestIdx;
 }
 
+std::optional<FacePickResult> pickObjectFace(const AppState& app, glm::vec3 rayO, glm::vec3 rayD) {
+  float bestT = std::numeric_limits<float>::max();
+  std::optional<FacePickResult> best;
+  for (int oi = 0; oi < static_cast<int>(app.sceneObjects.size()); ++oi) {
+    if (oi < static_cast<int>(app.sceneObjectMeta.size()) && !app.sceneObjectMeta[oi].visible) {
+      continue;
+    }
+    const auto& verts = app.sceneObjects[oi].vertices();
+    const auto& inds = app.sceneObjects[oi].indices();
+    for (size_t i = 0; i + 2 < inds.size(); i += 3) {
+      const glm::vec3& v0 = verts[inds[i]].position;
+      const glm::vec3& v1 = verts[inds[i + 1]].position;
+      const glm::vec3& v2 = verts[inds[i + 2]].position;
+      float t = rayTriangle(rayO, rayD, v0, v1, v2);
+      if (t > 0.0f && t < bestT) {
+        bestT = t;
+        FacePickResult hit;
+        hit.objectIndex = oi;
+        hit.triangleOffset = static_cast<int>(i);
+        hit.hitPoint = rayO + rayD * t;
+        hit.normal = glm::normalize(glm::cross(v1 - v0, v2 - v0));
+        if (glm::dot(hit.normal, hit.normal) < 1e-8f) {
+          hit.normal = {0.0f, 0.0f, 1.0f};
+        }
+        best = hit;
+      }
+    }
+  }
+  return best;
+}
+
+SketchPlane sketchPlaneFromNormal(glm::vec3 n) {
+  n = glm::abs(glm::normalize(n));
+  if (n.x >= n.y && n.x >= n.z) return SketchPlane::YZ;
+  if (n.y >= n.x && n.y >= n.z) return SketchPlane::XZ;
+  return SketchPlane::XY;
+}
+
 void appendGrid(std::vector<ColorVertex>& lines, SketchPlane plane, float extent, float spacing) {
   const glm::vec4 gridColor(0.25f, 0.25f, 0.25f, 1.0f);
   const int count = static_cast<int>(extent / spacing);
@@ -740,25 +852,14 @@ void appendGrid(std::vector<ColorVertex>& lines, SketchPlane plane, float extent
   }
 }
 
-void enterSketchMode(AppState* app, SketchPlane plane) {
-  app->sceneMode = SceneMode::Sketch;
-  app->activePlane = plane;
-  app->sketchTool.setTool(Tool::None);
-
-  // Snap camera to face the chosen plane.
-  switch (plane) {
-    case SketchPlane::XY: app->camera.snap(CameraController::Orientation::Front); break;
-    case SketchPlane::XZ: app->camera.snap(CameraController::Orientation::Top);   break;
-    case SketchPlane::YZ: app->camera.snap(CameraController::Orientation::Right); break;
-  }
-}
-
 void exitSketchMode(AppState* app) {
   app->sceneMode = SceneMode::View3D;
   app->sketchTool.cancel();
   app->sketchTool.setTool(Tool::None);
   app->extrudeTool.cancel();
-  app->activeSketch().clearSelection();
+  if (app->hasActiveSketch()) {
+    app->activeSketch().clearSelection();
+  }
 }
 
 void drawMenuBar(AppState* app) {
@@ -770,12 +871,10 @@ void drawMenuBar(AppState* app) {
       clearSceneObjects(app);
       app->renderer.setMesh(app->mesh);
       exitSketchMode(app);
-      for (auto& s : app->sketches) { s.clear(); }
-      initializeSketchMetadata(app);
-      app->browserSelectedSketches.clear();
-      app->sketchSelectionAnchor = -1;
-      app->renameSketchIndex = -1;
+      clearSketches(app);
       app->extrudeTool.cancel();
+      app->sketchCreate = {};
+      app->partialSelectedObject = -1;
       app->project.initFromAppSettings(app->appSettings);
       app->status = "New scene";
     }
@@ -798,11 +897,17 @@ void drawMenuBar(AppState* app) {
   }
 
   if (ImGui::BeginMenu("Sketch")) {
-    if (ImGui::MenuItem("XY Plane")) enterSketchMode(app, SketchPlane::XY);
-    if (ImGui::MenuItem("XZ Plane")) enterSketchMode(app, SketchPlane::XZ);
-    if (ImGui::MenuItem("YZ Plane")) enterSketchMode(app, SketchPlane::YZ);
+    if (ImGui::MenuItem("New Sketch...")) {
+      app->sketchCreate.open = true;
+      app->sketchCreate.pickFromScene = true;
+      app->sketchCreate.fromFace = false;
+      app->sketchCreate.sourceObject = -1;
+      app->partialSelectedObject = -1;
+      app->status = "Click origin planes or an object face to set the sketch plane";
+    }
     ImGui::Separator();
-    if (ImGui::MenuItem("Exit Sketch", nullptr, false, app->sceneMode == SceneMode::Sketch)) {
+    if (ImGui::MenuItem("Exit Sketch", nullptr, false,
+                        app->sceneMode == SceneMode::Sketch && app->hasActiveSketch())) {
       exitSketchMode(app);
     }
     ImGui::EndMenu();
@@ -837,6 +942,134 @@ void drawMenuBar(AppState* app) {
   }
 
   ImGui::EndMainMenuBar();
+}
+
+void drawNewSketchWindow(AppState* app) {
+  if (!app->sketchCreate.open) return;
+
+  ImGui::SetNextWindowSize(ImVec2(420.0f, 0.0f), ImGuiCond_FirstUseEver);
+  if (!ImGui::Begin("New Sketch", &app->sketchCreate.open)) {
+    ImGui::End();
+    return;
+  }
+
+  ImGui::TextWrapped("Pick a base plane from center axes or click a face on an object.");
+  ImGui::TextWrapped("Then set an optional offset and create the sketch.");
+  ImGui::Separator();
+
+  const char* planeName = "XY";
+  if (app->sketchCreate.plane == SketchPlane::XZ) planeName = "XZ";
+  if (app->sketchCreate.plane == SketchPlane::YZ) planeName = "YZ";
+  ImGui::Text("Selected plane: %s", planeName);
+  if (app->sketchCreate.fromFace && app->sketchCreate.sourceObject >= 0) {
+    ImGui::Text("Source: Object %d face", app->sketchCreate.sourceObject + 1);
+  } else {
+    ImGui::TextUnformatted("Source: Center plane");
+  }
+  ImGui::InputFloat("Offset (mm)", &app->sketchCreate.offsetMm, 1.0f, 10.0f, "%.3f");
+
+  if (!app->sketchCreate.pickFromScene) {
+    if (ImGui::Button("Pick Plane From Scene", ImVec2(-1.0f, 0.0f))) {
+      app->sketchCreate.pickFromScene = true;
+      app->partialSelectedObject = -1;
+      app->status = "Click a center plane near origin or click an object face";
+    }
+  } else {
+    ImGui::TextDisabled("Picking active: click in viewport to choose plane");
+    if (ImGui::Button("Stop Picking", ImVec2(-1.0f, 0.0f))) {
+      app->sketchCreate.pickFromScene = false;
+      app->partialSelectedObject = -1;
+    }
+  }
+
+  ImGui::Spacing();
+  if (ImGui::Button("Create Sketch", ImVec2(150.0f, 0.0f))) {
+    createSketch(app, app->sketchCreate.plane, app->sketchCreate.offsetMm);
+    app->sketchCreate.open = false;
+    app->sketchCreate.pickFromScene = false;
+    app->partialSelectedObject = -1;
+    app->status = "Sketch created";
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Cancel", ImVec2(150.0f, 0.0f))) {
+    app->sketchCreate = {};
+    app->partialSelectedObject = -1;
+  }
+
+  ImGui::End();
+}
+
+void drawProjectToolWindow(AppState* app) {
+  if (!app->showProjectTool || app->sceneMode != SceneMode::Sketch || !app->hasActiveSketch()) {
+    return;
+  }
+
+  ImGui::SetNextWindowSize(ImVec2(380.0f, 0.0f), ImGuiCond_FirstUseEver);
+  if (!ImGui::Begin("Project Tool", &app->showProjectTool)) {
+    ImGui::End();
+    return;
+  }
+
+  if (app->activeSketchIndex <= 0) {
+    ImGui::TextDisabled("No earlier sketches to project from.");
+    ImGui::End();
+    return;
+  }
+
+  if (app->projectSourceSketchIndex < 0 || app->projectSourceSketchIndex >= app->activeSketchIndex) {
+    app->projectSourceSketchIndex = app->activeSketchIndex - 1;
+  }
+
+  std::vector<const char*> names;
+  names.reserve(app->activeSketchIndex);
+  for (int i = 0; i < app->activeSketchIndex; ++i) {
+    names.push_back(app->sketches[i].meta.name.data());
+  }
+  int source = app->projectSourceSketchIndex;
+  if (ImGui::Combo("Source Sketch", &source, names.data(), static_cast<int>(names.size()))) {
+    app->projectSourceSketchIndex = source;
+  }
+
+  const auto& sourceSketch = app->sketches[app->projectSourceSketchIndex].sketch;
+  const auto& elems = sourceSketch.elements();
+  if (app->projectSelectionMask.size() != elems.size()) {
+    app->projectSelectionMask.assign(elems.size(), false);
+  }
+
+  if (ImGui::Button("Select All")) {
+    std::fill(app->projectSelectionMask.begin(), app->projectSelectionMask.end(), true);
+  }
+  ImGui::SameLine();
+  if (ImGui::Button("Clear")) {
+    std::fill(app->projectSelectionMask.begin(), app->projectSelectionMask.end(), false);
+  }
+
+  ImGui::BeginChild("##projectElems", ImVec2(0.0f, 180.0f), true);
+  for (size_t i = 0; i < elems.size(); ++i) {
+    std::string label = "Element " + std::to_string(i + 1);
+    bool checked = app->projectSelectionMask[i];
+    if (ImGui::Checkbox(label.c_str(), &checked)) {
+      app->projectSelectionMask[i] = checked;
+    }
+  }
+  ImGui::EndChild();
+
+  const bool canProject = !app->activeSketchLocked() && !app->projectSelectionMask.empty();
+  if (ImGui::Button("Project Selected", ImVec2(-1.0f, 0.0f))) {
+    if (!canProject) {
+      app->status = "Active sketch is locked or source is empty";
+    } else {
+      int copied = 0;
+      for (size_t i = 0; i < elems.size(); ++i) {
+        if (!app->projectSelectionMask[i]) continue;
+        app->activeSketch().addElement(elems[i]);
+        ++copied;
+      }
+      app->status = copied > 0 ? "Projected elements into active sketch" : "No elements selected";
+    }
+  }
+
+  ImGui::End();
 }
 
 void drawPanel(AppState* app) {
@@ -1085,8 +1318,11 @@ void drawObjectBrowserWindow(AppState* app) {
       ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
       ImGui::TableHeadersRow();
 
-      for (int i = 0; i < 3; ++i) {
-        auto& meta = app->sketchMeta[i];
+      for (int i = 0; i < static_cast<int>(app->sketches.size()); ++i) {
+        if (app->sceneMode == SceneMode::Sketch && app->hasActiveSketch() && i > app->activeSketchIndex) {
+          continue;
+        }
+        auto& meta = app->sketches[i].meta;
         const bool selected = hasIndex(app->browserSelectedSketches, i);
         const bool renameInline = app->renameSketchIndex == i &&
                                   app->browserSelectedSketches.size() == 1 &&
@@ -1153,7 +1389,7 @@ void drawObjectBrowserWindow(AppState* app) {
         }
 
         if ((changedVisibility || changedLock) &&
-            app->activePlane == static_cast<SketchPlane>(i) &&
+          app->hasActiveSketch() && app->activeSketchIndex == i &&
             (!meta.visible || meta.locked)) {
           app->sketchTool.cancel();
           app->sketchTool.setTool(Tool::None);
@@ -1165,6 +1401,9 @@ void drawObjectBrowserWindow(AppState* app) {
       }
 
       ImGui::EndTable();
+    }
+    if (app->sketches.empty()) {
+      ImGui::TextDisabled("(no sketches)");
     }
   }
 
@@ -1197,15 +1436,18 @@ void drawObjectBrowserWindow(AppState* app) {
         }
         syncSelectedObjectFromBrowser(app);
       } else {
-        if (ImGui::GetIO().KeyShift) {
+        const int count = (app->sceneMode == SceneMode::Sketch && app->hasActiveSketch())
+                              ? (app->activeSketchIndex + 1)
+                              : static_cast<int>(app->sketches.size());
+        if (ImGui::GetIO().KeyShift && count > 0) {
           int anchor = app->sketchSelectionAnchor >= 0 ? app->sketchSelectionAnchor :
                        (app->browserSelectedSketches.empty() ? 0 : app->browserSelectedSketches.front());
           int current = app->browserSelectedSketches.empty() ? anchor : app->browserSelectedSketches.front();
-          current = std::clamp(current - 1, 0, 2);
+          current = std::clamp(current - 1, 0, count - 1);
           app->sketchSelectionAnchor = anchor;
           setSelectionRange(app->browserSelectedSketches, anchor, current);
         } else {
-          stepSelection(app->browserSelectedSketches, 3, -1);
+          stepSelection(app->browserSelectedSketches, count, -1);
           if (!app->browserSelectedSketches.empty()) {
             app->sketchSelectionAnchor = app->browserSelectedSketches.front();
           }
@@ -1232,15 +1474,18 @@ void drawObjectBrowserWindow(AppState* app) {
         }
         syncSelectedObjectFromBrowser(app);
       } else {
-        if (ImGui::GetIO().KeyShift) {
+        const int count = (app->sceneMode == SceneMode::Sketch && app->hasActiveSketch())
+                              ? (app->activeSketchIndex + 1)
+                              : static_cast<int>(app->sketches.size());
+        if (ImGui::GetIO().KeyShift && count > 0) {
           int anchor = app->sketchSelectionAnchor >= 0 ? app->sketchSelectionAnchor :
                        (app->browserSelectedSketches.empty() ? 0 : app->browserSelectedSketches.front());
           int current = app->browserSelectedSketches.empty() ? anchor : app->browserSelectedSketches.front();
-          current = std::clamp(current + 1, 0, 2);
+          current = std::clamp(current + 1, 0, count - 1);
           app->sketchSelectionAnchor = anchor;
           setSelectionRange(app->browserSelectedSketches, anchor, current);
         } else {
-          stepSelection(app->browserSelectedSketches, 3, 1);
+          stepSelection(app->browserSelectedSketches, count, 1);
           if (!app->browserSelectedSketches.empty()) {
             app->sketchSelectionAnchor = app->browserSelectedSketches.front();
           }
@@ -1458,8 +1703,7 @@ int main() {
   AppState app;
   glfwSetWindowUserPointer(window, &app);
   glfwSetFramebufferSizeCallback(window, framebufferResizeCallback);
-  initializeSketchMetadata(&app);
-  app.browserSelectedSketches.assign(1, 0);
+  clearSketches(&app);
 
   std::string error;
   if (!app.renderer.initialize(window, error)) {
@@ -1508,14 +1752,14 @@ int main() {
 
     // --- Toolbar (sketch mode only) ---
     ToolbarAction toolbarAction;
-    if (app.sceneMode == SceneMode::Sketch) {
+    if (app.sceneMode == SceneMode::Sketch && app.hasActiveSketch()) {
       toolbarAction =
           app.toolbar.draw(app.sketchTool, app.extrudeTool,
                            app.activeSketch().hasSelection(), app.project.defaultUnit);
     }
 
     // Handle "Extrude" button press: gather profiles from selection.
-    if (toolbarAction.extrudeRequested && !app.extrudeTool.active()) {
+    if (toolbarAction.extrudeRequested && !app.extrudeTool.active() && app.hasActiveSketch()) {
       if (!app.activeSketchVisible()) {
         app.status = "Active sketch is hidden";
       } else if (app.activeSketchLocked()) {
@@ -1533,7 +1777,7 @@ int main() {
 
       auto profiles = profile::chainProfiles(polylines);
       if (!profiles.empty()) {
-        app.extrudeTool.begin(std::move(profiles), app.activePlane);
+        app.extrudeTool.begin(std::move(profiles), app.activePlane());
         app.camera.snap(CameraController::Orientation::Isometric);
         app.extrudeOptions.visible = true;
         app.extrudeOptions.applyRequested = false;
@@ -1622,7 +1866,60 @@ int main() {
       const bool ctrlHeld = (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
                              glfwGetKey(window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS);
 
-      if (app.extrudeTool.active()) {
+      if (app.sketchCreate.open && app.sketchCreate.pickFromScene) {
+        if (leftDown && !app.wasLeftDown) {
+          app.dragStartScreen = {static_cast<float>(x), static_cast<float>(y)};
+        } else if (!leftDown && app.wasLeftDown) {
+          const glm::vec2 cur(static_cast<float>(x), static_cast<float>(y));
+          if (glm::dot(cur - app.dragStartScreen, cur - app.dragStartScreen) < kDragThresholdSq) {
+            int fbW = 0, fbH = 0;
+            glfwGetFramebufferSize(window, &fbW, &fbH);
+            const glm::mat4 view = app.camera.viewMatrix();
+            const glm::mat4 proj = app.camera.projectionMatrix(app.renderer.framebufferAspect());
+            glm::vec3 rayO, rayD;
+            screenToRay(static_cast<float>(x), static_cast<float>(y),
+                        static_cast<float>(fbW), static_cast<float>(fbH),
+                        view, proj, rayO, rayD);
+
+            if (auto face = pickObjectFace(app, rayO, rayD)) {
+              app.sketchCreate.fromFace = true;
+              app.sketchCreate.sourceObject = face->objectIndex;
+              app.sketchCreate.plane = sketchPlaneFromNormal(face->normal);
+              app.sketchCreate.offsetMm = planeAxisValue(face->hitPoint, app.sketchCreate.plane);
+              app.partialSelectedObject = face->objectIndex;
+              app.sketchCreate.pickFromScene = false;
+              app.status = "Face selected for sketch plane";
+            } else {
+              std::optional<glm::vec3> bestHit;
+              SketchPlane bestPlane = SketchPlane::XY;
+              float bestDist = std::numeric_limits<float>::max();
+              for (SketchPlane candidate : {SketchPlane::XY, SketchPlane::XZ, SketchPlane::YZ}) {
+                auto hit = rayPlaneHit(static_cast<float>(x), static_cast<float>(y),
+                                       static_cast<float>(fbW), static_cast<float>(fbH),
+                                       view, proj, candidate, 0.0f);
+                if (!hit) continue;
+                const float d = glm::length(*hit);
+                if (d < bestDist) {
+                  bestDist = d;
+                  bestHit = hit;
+                  bestPlane = candidate;
+                }
+              }
+              if (bestHit && bestDist <= 25.0f) {
+                app.sketchCreate.fromFace = false;
+                app.sketchCreate.sourceObject = -1;
+                app.sketchCreate.plane = bestPlane;
+                app.sketchCreate.offsetMm = 0.0f;
+                app.partialSelectedObject = -1;
+                app.sketchCreate.pickFromScene = false;
+                app.status = "Center plane selected for new sketch";
+              } else {
+                app.status = "No face or center plane hit. Try clicking a visible face or near origin";
+              }
+            }
+          }
+        }
+      } else if (app.extrudeTool.active()) {
         // --- Extrude mode: mouse controls extrusion distance ---
         int fbW = 0, fbH = 0;
         glfwGetFramebufferSize(window, &fbW, &fbH);
@@ -1642,7 +1939,7 @@ int main() {
           app.extrudeTool.mouseUp();
         }
 
-      } else if (app.sceneMode == SceneMode::Sketch &&
+      } else if (app.sceneMode == SceneMode::Sketch && app.hasActiveSketch() &&
                  app.sketchTool.activeTool() != Tool::None &&
                  app.activeSketchVisible() && !app.activeSketchLocked()) {
         // --- Drawing mode: feed mouse to SketchTool ---
@@ -1653,9 +1950,9 @@ int main() {
 
         auto hit = rayPlaneHit(static_cast<float>(x), static_cast<float>(y),
                                static_cast<float>(fbW), static_cast<float>(fbH),
-                               view, proj, app.activePlane);
+                               view, proj, app.activePlane(), app.activePlaneOffset());
         if (hit) {
-          glm::vec2 planePos = toPlane(*hit, app.activePlane);
+          glm::vec2 planePos = toPlane(*hit, app.activePlane());
 
           // Snap to existing control points.
           auto snap = app.activeSketch().snapToPoint(planePos, kSnapThreshold);
@@ -1668,7 +1965,7 @@ int main() {
           }
         }
 
-      } else if (app.sceneMode == SceneMode::Sketch &&
+      } else if (app.sceneMode == SceneMode::Sketch && app.hasActiveSketch() &&
                  app.sketchTool.activeTool() == Tool::None &&
                  app.activeSketchVisible() && !app.activeSketchLocked()) {
         // --- Selection mode: click, ctrl-click, or drag-select ---
@@ -1694,13 +1991,13 @@ int main() {
             // Drag-select complete: convert screen rect to plane coords.
             auto hitA = rayPlaneHit(app.dragStartScreen.x, app.dragStartScreen.y,
                                     static_cast<float>(fbW), static_cast<float>(fbH),
-                                    view, proj, app.activePlane);
+                                    view, proj, app.activePlane(), app.activePlaneOffset());
             auto hitB = rayPlaneHit(app.dragCurScreen.x, app.dragCurScreen.y,
                                     static_cast<float>(fbW), static_cast<float>(fbH),
-                                    view, proj, app.activePlane);
+                                    view, proj, app.activePlane(), app.activePlaneOffset());
             if (hitA && hitB) {
-              glm::vec2 pA = toPlane(*hitA, app.activePlane);
-              glm::vec2 pB = toPlane(*hitB, app.activePlane);
+              glm::vec2 pA = toPlane(*hitA, app.activePlane());
+              glm::vec2 pB = toPlane(*hitB, app.activePlane());
               if (ctrlHeld) {
                 app.activeSketch().addToSelectInRect(pA, pB);
               } else {
@@ -1712,9 +2009,9 @@ int main() {
             // Single click: point-select with hit test.
             auto hit = rayPlaneHit(static_cast<float>(x), static_cast<float>(y),
                                    static_cast<float>(fbW), static_cast<float>(fbH),
-                                   view, proj, app.activePlane);
+                                   view, proj, app.activePlane(), app.activePlaneOffset());
             if (hit) {
-              glm::vec2 planePos = toPlane(*hit, app.activePlane);
+              glm::vec2 planePos = toPlane(*hit, app.activePlane());
               auto idx = app.activeSketch().hitTest(planePos, kHitTestThreshold);
               if (idx) {
                 if (ctrlHeld) {
@@ -1826,13 +2123,13 @@ int main() {
         app.status = "Extrude cancelled";
       } else if (app.sketchTool.activeTool() != Tool::None) {
         app.sketchTool.cancel();
-      } else if (app.sceneMode == SceneMode::Sketch) {
+      } else if (app.sceneMode == SceneMode::Sketch && app.hasActiveSketch()) {
         exitSketchMode(&app);
       }
     }
 
     // Delete key: remove selected sketch elements.
-    if (!io.WantCaptureKeyboard && app.sceneMode == SceneMode::Sketch &&
+    if (!io.WantCaptureKeyboard && app.sceneMode == SceneMode::Sketch && app.hasActiveSketch() &&
         (glfwGetKey(window, GLFW_KEY_DELETE) == GLFW_PRESS ||
          glfwGetKey(window, GLFW_KEY_BACKSPACE) == GLFW_PRESS)) {
       if (app.activeSketchLocked()) {
@@ -1844,7 +2141,7 @@ int main() {
     }
 
     // Right-click context menu (sketch mode).
-    if (app.sceneMode == SceneMode::Sketch && !app.extrudeTool.active() &&
+    if (app.sceneMode == SceneMode::Sketch && app.hasActiveSketch() && !app.extrudeTool.active() &&
         app.activeSketchVisible()) {
       if (glfwGetMouseButton(window, GLFW_MOUSE_BUTTON_RIGHT) == GLFW_PRESS &&
           !io.WantCaptureMouse) {
@@ -1885,8 +2182,10 @@ int main() {
     }
 
     // Consume completed sketch primitives.
-    if (auto prim = app.sketchTool.takeResult()) {
+    if (app.hasActiveSketch()) {
+      if (auto prim = app.sketchTool.takeResult()) {
       app.activeSketch().addCompletedPrimitive(std::move(*prim));
+      }
     }
 
     // --- Build line data every frame ---
@@ -1896,15 +2195,27 @@ int main() {
     std::vector<glm::vec2> danglingPoints;
     app.gizmo.appendLines(allLines);
 
-    if (app.sceneMode == SceneMode::Sketch && app.activeSketchVisible()) {
-      appendGrid(allLines, app.activePlane, app.project.gridExtent, app.project.gridSpacing);
-      app.activeSketch().appendLines(allLines, app.activePlane);
-      app.activeSketch().appendConstraintAnnotations(allLines, app.activePlane);
-      app.activeSketch().appendConstraintLabels(dimensionLabels, app.activePlane,
-                                               app.project.defaultUnit);
+    if (app.sceneMode == SceneMode::Sketch && app.hasActiveSketch() && app.activeSketchVisible()) {
+      appendGrid(allLines, app.activePlane(), app.project.gridExtent, app.project.gridSpacing);
+      for (int i = 0; i <= app.activeSketchIndex; ++i) {
+        const auto& entry = app.sketches[i];
+        if (!entry.meta.visible) continue;
+        std::vector<ColorVertex> sketchLines;
+        entry.sketch.appendLines(sketchLines, entry.plane);
+        entry.sketch.appendConstraintAnnotations(sketchLines, entry.plane);
+        for (auto& line : sketchLines) {
+          line.position += planeNormal(entry.plane) * entry.offsetMm;
+          allLines.push_back(line);
+        }
+      }
+      app.activeSketch().appendConstraintLabels(dimensionLabels, app.activePlane(),
+                                                app.project.defaultUnit);
+      for (auto& label : dimensionLabels) {
+        label.worldPos += planeNormal(app.activePlane()) * app.activePlaneOffset();
+      }
       filledProfiles = app.activeSketch().closedProfiles();
       danglingPoints = app.activeSketch().danglingEndpoints();
-      app.sketchTool.appendPreview(allLines, app.activePlane);
+      app.sketchTool.appendPreview(allLines, app.activePlane());
 
       // Snap indicator: show a small preview cross at the snap point when drawing.
       if (app.sketchTool.activeTool() != Tool::None) {
@@ -1916,18 +2227,18 @@ int main() {
         const glm::mat4 proj = app.camera.projectionMatrix(app.renderer.framebufferAspect());
         auto hit = rayPlaneHit(static_cast<float>(mx), static_cast<float>(my),
                                static_cast<float>(fbW), static_cast<float>(fbH),
-                               view, proj, app.activePlane);
+                               view, proj, app.activePlane(), app.activePlaneOffset());
         if (hit) {
-          glm::vec2 pp = toPlane(*hit, app.activePlane);
+          glm::vec2 pp = toPlane(*hit, app.activePlane());
           auto snap = app.activeSketch().snapToPoint(pp, kSnapThreshold);
           if (snap) {
             const float sz = kSnapIndicatorSize;
             const glm::vec4 snapColor{0.0f, 1.0f, 1.0f, 1.0f};
             glm::vec2 s = *snap;
-            allLines.push_back({toWorld(s + glm::vec2(-sz, 0.0f), app.activePlane), snapColor});
-            allLines.push_back({toWorld(s + glm::vec2(sz, 0.0f), app.activePlane), snapColor});
-            allLines.push_back({toWorld(s + glm::vec2(0.0f, -sz), app.activePlane), snapColor});
-            allLines.push_back({toWorld(s + glm::vec2(0.0f, sz), app.activePlane), snapColor});
+            allLines.push_back({toWorld(s + glm::vec2(-sz, 0.0f), app.activePlane(), app.activePlaneOffset()), snapColor});
+            allLines.push_back({toWorld(s + glm::vec2(sz, 0.0f), app.activePlane(), app.activePlaneOffset()), snapColor});
+            allLines.push_back({toWorld(s + glm::vec2(0.0f, -sz), app.activePlane(), app.activePlaneOffset()), snapColor});
+            allLines.push_back({toWorld(s + glm::vec2(0.0f, sz), app.activePlane(), app.activePlaneOffset()), snapColor});
           }
         }
       }
@@ -1942,6 +2253,9 @@ int main() {
     if (highlightObjects.empty() && app.selectedObject >= 0) {
       highlightObjects.push_back(app.selectedObject);
     }
+    if (app.partialSelectedObject >= 0 && !hasIndex(highlightObjects, app.partialSelectedObject)) {
+      highlightObjects.push_back(app.partialSelectedObject);
+    }
     for (int selectedIdx : highlightObjects) {
       if (selectedIdx >= static_cast<int>(app.sceneObjectMeta.size()) ||
           !app.sceneObjectMeta[selectedIdx].visible) {
@@ -1950,7 +2264,9 @@ int main() {
       const auto& obj = app.sceneObjects[selectedIdx];
       const auto& verts = obj.vertices();
       const auto& inds = obj.indices();
-      const glm::vec4 hlColor(0.0f, 0.8f, 1.0f, 1.0f);
+      const bool partial = selectedIdx == app.partialSelectedObject;
+      const glm::vec4 hlColor = partial ? glm::vec4(0.4f, 0.6f, 0.7f, 0.8f)
+                    : glm::vec4(0.0f, 0.8f, 1.0f, 1.0f);
       for (size_t i = 0; i + 2 < inds.size(); i += 3) {
         const glm::vec3& a = verts[inds[i]].position;
         const glm::vec3& b = verts[inds[i + 1]].position;
@@ -1968,6 +2284,8 @@ int main() {
 
     drawPanel(&app);
     drawObjectBrowserWindow(&app);
+    drawNewSketchWindow(&app);
+    drawProjectToolWindow(&app);
     drawAppSettingsWindow(&app);
     drawProjectSettingsWindow(&app);
     drawExtrudeOptionsWindow(&app);
@@ -2075,7 +2393,7 @@ int main() {
       dl->AddRect(p1, p2, IM_COL32(0, 120, 255, 200), 0.0f, 0, 1.5f);
     }
 
-    if (app.sceneMode == SceneMode::Sketch && app.activeSketchVisible()) {
+    if (app.sceneMode == SceneMode::Sketch && app.hasActiveSketch() && app.activeSketchVisible()) {
       ImDrawList* dl = ImGui::GetForegroundDrawList();
       const ImVec2 viewportSize = ImGui::GetIO().DisplaySize;
       const glm::mat4 view = app.camera.viewMatrix();
@@ -2084,11 +2402,11 @@ int main() {
       for (const auto& profile : filledProfiles) {
         const auto tris = profile::triangulate2D(profile);
         for (const auto& tri : tris) {
-          auto a = projectToScreen(toWorld(profile[tri[0]], app.activePlane), view, proj,
+          auto a = projectToScreen(toWorld(profile[tri[0]], app.activePlane(), app.activePlaneOffset()), view, proj,
                                    viewportSize);
-          auto b = projectToScreen(toWorld(profile[tri[1]], app.activePlane), view, proj,
+          auto b = projectToScreen(toWorld(profile[tri[1]], app.activePlane(), app.activePlaneOffset()), view, proj,
                                    viewportSize);
-          auto c = projectToScreen(toWorld(profile[tri[2]], app.activePlane), view, proj,
+          auto c = projectToScreen(toWorld(profile[tri[2]], app.activePlane(), app.activePlaneOffset()), view, proj,
                                    viewportSize);
           if (!a || !b || !c) continue;
           dl->AddTriangleFilled(*a, *b, *c, IM_COL32(90, 170, 255, 28));
@@ -2096,7 +2414,7 @@ int main() {
       }
 
       for (const glm::vec2& pt : danglingPoints) {
-        auto screenPos = projectToScreen(toWorld(pt, app.activePlane), view, proj, viewportSize);
+        auto screenPos = projectToScreen(toWorld(pt, app.activePlane(), app.activePlaneOffset()), view, proj, viewportSize);
         if (!screenPos) continue;
         dl->AddCircleFilled(*screenPos, 4.0f, IM_COL32(230, 60, 60, 255), 16);
       }
