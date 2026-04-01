@@ -27,7 +27,15 @@ void setSelectionRange(std::vector<int>& selection, int start, int end);
 void stepSelection(std::vector<int>& selection, int count, int delta);
 
 void syncSelectedObjectFromBrowser(AppState* app);
+void syncSelectedPlaneFromBrowser(AppState* app);
 void syncSelectedSketchFromBrowser(AppState* app);
+
+void initializeDefaultPlanes(AppState* app);
+int defaultPlaneId(SketchPlane plane);
+int findPlaneIndexById(const AppState* app, int planeId);
+ResolvedPlane resolvePlane(const AppState* app, int planeId);
+void syncSketchPlanes(AppState* app);
+std::string planeName(const AppState* app, int planeIndex);
 
 void clearSketches(AppState* app);
 void snapCameraToPlane(AppState* app, SketchPlane plane);
@@ -35,7 +43,10 @@ void snapCameraToPlane(AppState* app, SketchPlane plane);
 std::string objectName(const AppState* app, int idx);
 std::vector<std::string> objectNames(const AppState* app, const std::vector<int>& indices);
 
-void createSketch(AppState* app, SketchPlane plane, float offsetMm);
+void createSketch(AppState* app, int planeId);
+void createOffsetPlaneFromPlane(AppState* app, int parentPlaneId, float distanceMm);
+void createOffsetPlaneFromFace(AppState* app, int sourceObjectIndex,
+                               SketchPlane plane, int faceSign, float distanceMm);
 void appendSceneObject(AppState* app, StlMesh mesh);
 void clearSceneObjects(AppState* app);
 

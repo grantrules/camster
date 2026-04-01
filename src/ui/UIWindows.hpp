@@ -4,6 +4,7 @@
 
 void drawMenuBar(AppState* app);
 void drawSolidToolbar(AppState* app);
+void drawNewPlaneWindow(AppState* app);
 void drawNewSketchWindow(AppState* app);
 void drawProjectToolWindow(AppState* app);
 void drawPanel(AppState* app);

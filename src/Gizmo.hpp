@@ -13,6 +13,11 @@
 // LINE_LIST vertex pairs.
 class Gizmo {
  public:
+  // Uniformly scales the gizmo and plane indicator geometry in world space.
+  void setScale(float scale);
+  float scale() const { return scale_; }
+  float planeSize() const;
+
   // Append gizmo line vertices to `lines` (arrows + plane indicators).
   void appendLines(std::vector<ColorVertex>& lines) const;
 
@@ -27,4 +32,7 @@ class Gizmo {
 
   // Size of the plane indicator square (in world coordinates).
   static constexpr float kPlaneSize = 0.4f;
+
+ private:
+  float scale_ = 1.0f;
 };

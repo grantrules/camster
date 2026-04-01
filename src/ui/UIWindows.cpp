@@ -180,6 +180,158 @@ glm::vec2 centroid2D(const std::vector<glm::vec2>& poly) {
   for (size_t i = 0; i < n; ++i) c += poly[i];
   return c / static_cast<float>(n);
 }
+
+const char* planeShortName(SketchPlane plane) {
+  switch (plane) {
+    case SketchPlane::XY: return "XY";
+    case SketchPlane::XZ: return "XZ";
+    case SketchPlane::YZ: return "YZ";
+  }
+  return "XY";
+}
+
+const char* faceSignLabel(int faceSign) {
+  return faceSign >= 0 ? "+" : "-";
+}
+
+bool lockIconToggle(const char* id, bool* locked, bool enabled = true) {
+  if (!locked) return false;
+
+  if (!enabled) ImGui::BeginDisabled();
+  const float h = ImGui::GetFrameHeight();
+  const float w = h * 0.95f;
+  const ImVec2 p = ImGui::GetCursorScreenPos();
+  bool changed = false;
+  if (ImGui::InvisibleButton(id, ImVec2(w, h))) {
+    *locked = !*locked;
+    changed = true;
+  }
+
+  const bool hovered = ImGui::IsItemHovered();
+  const ImU32 col = ImGui::GetColorU32(
+      hovered ? ImVec4(0.95f, 0.85f, 0.35f, 1.0f)
+              : (*locked ? ImVec4(0.90f, 0.78f, 0.22f, 1.0f)
+                         : ImVec4(0.66f, 0.66f, 0.66f, 1.0f)));
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+
+  const ImVec2 bodyMin(p.x + w * 0.22f, p.y + h * 0.48f);
+  const ImVec2 bodyMax(p.x + w * 0.78f, p.y + h * 0.86f);
+  dl->AddRect(bodyMin, bodyMax, col, 2.0f, 0, 1.8f);
+
+  const float shackleTop = p.y + h * 0.20f;
+  const float shackleBottom = p.y + h * 0.50f;
+  const float leftX = p.x + w * 0.30f;
+  const float rightX = p.x + w * 0.70f;
+  if (*locked) {
+    dl->AddLine(ImVec2(leftX, shackleBottom), ImVec2(leftX, shackleTop), col, 1.8f);
+    dl->AddLine(ImVec2(leftX, shackleTop), ImVec2(rightX, shackleTop), col, 1.8f);
+    dl->AddLine(ImVec2(rightX, shackleTop), ImVec2(rightX, shackleBottom), col, 1.8f);
+  } else {
+    dl->AddLine(ImVec2(leftX, shackleBottom), ImVec2(leftX, shackleTop), col, 1.8f);
+    dl->AddLine(ImVec2(leftX, shackleTop), ImVec2(rightX - w * 0.08f, shackleTop), col, 1.8f);
+    dl->AddLine(ImVec2(rightX, shackleTop + h * 0.09f), ImVec2(rightX, shackleBottom), col,
+                1.8f);
+  }
+
+  if (hovered) {
+    ImGui::SetTooltip(*locked ? "Locked" : "Unlocked");
+  }
+  if (!enabled) ImGui::EndDisabled();
+  return changed;
+}
+
+bool visibilityIconToggle(const char* id, bool* visible) {
+  if (!visible) return false;
+
+  const float h = ImGui::GetFrameHeight();
+  const float w = h * 0.95f;
+  const ImVec2 p = ImGui::GetCursorScreenPos();
+  bool changed = false;
+  if (ImGui::InvisibleButton(id, ImVec2(w, h))) {
+    *visible = !*visible;
+    changed = true;
+  }
+
+  const bool hovered = ImGui::IsItemHovered();
+  const ImU32 col = ImGui::GetColorU32(
+      hovered ? ImVec4(0.72f, 0.86f, 0.98f, 1.0f)
+              : (*visible ? ImVec4(0.60f, 0.80f, 0.96f, 1.0f)
+                          : ImVec4(0.42f, 0.42f, 0.42f, 1.0f)));
+  ImDrawList* dl = ImGui::GetWindowDrawList();
+
+  const ImVec2 center(p.x + w * 0.5f, p.y + h * 0.56f);
+  const float rx = w * 0.32f;
+  const float ry = h * 0.22f;
+  dl->AddEllipse(center, ImVec2(rx, ry), col, 0.0f, 0, 1.6f);
+  const float pupil = (*visible ? h * 0.10f : h * 0.07f);
+  dl->AddCircleFilled(center, pupil, col);
+
+  if (!*visible) {
+    dl->AddLine(ImVec2(p.x + w * 0.20f, p.y + h * 0.24f),
+                ImVec2(p.x + w * 0.80f, p.y + h * 0.88f), col, 1.8f);
+  }
+
+  if (hovered) {
+    ImGui::SetTooltip(*visible ? "Visible" : "Hidden");
+  }
+  return changed;
+}
+
+ImVec2 uiViewportPos() {
+  if (const ImGuiViewport* vp = ImGui::GetMainViewport()) {
+    return vp->WorkPos;
+  }
+  return ImVec2(0.0f, 0.0f);
+}
+
+ImVec2 uiViewportSize() {
+  if (const ImGuiViewport* vp = ImGui::GetMainViewport()) {
+    return vp->WorkSize;
+  }
+  return ImGui::GetIO().DisplaySize;
+}
+
+float uiTopBarHeight() {
+  // Menu bar + one tool row (solid/sketch toolbar).
+  return ImGui::GetFrameHeight() * 2.0f + 8.0f;
+}
+
+void snapCurrentWindowToGuides(float topInset) {
+  const ImGuiViewport* vp = ImGui::GetMainViewport();
+  if (!vp) return;
+  if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) return;
+  if (!ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) return;
+
+  ImVec2 pos = ImGui::GetWindowPos();
+  const ImVec2 size = ImGui::GetWindowSize();
+  const float threshold = 18.0f;
+
+  const float left = vp->WorkPos.x + 12.0f;
+  const float right = vp->WorkPos.x + vp->WorkSize.x - size.x - 12.0f;
+  const float top = vp->WorkPos.y + topInset;
+  const float bottom = vp->WorkPos.y + vp->WorkSize.y - size.y - 12.0f;
+
+  bool snapped = false;
+  if (std::abs(pos.x - left) <= threshold) {
+    pos.x = left;
+    snapped = true;
+  } else if (std::abs(pos.x - right) <= threshold) {
+    pos.x = right;
+    snapped = true;
+  }
+
+  if (std::abs(pos.y - top) <= threshold) {
+    pos.y = top;
+    snapped = true;
+  } else if (std::abs(pos.y - bottom) <= threshold) {
+    pos.y = bottom;
+    snapped = true;
+  }
+
+  if (snapped) {
+    ImGui::SetWindowPos(pos, ImGuiCond_Always);
+  }
+}
 }  // namespace
 
 void drawMenuBar(AppState* app) {
@@ -192,8 +344,10 @@ void drawMenuBar(AppState* app) {
       app->renderer.setMesh(app->mesh);
       exitSketchMode(app);
       clearSketches(app);
+      initializeDefaultPlanes(app);
       app->extrudeTool.cancel();
       app->sketchCreate = {};
+      app->planeCreate = {};
       app->partialSelectedObject = -1;
       app->project.initFromAppSettings(app->appSettings);
       app->status = "New scene";
@@ -218,12 +372,34 @@ void drawMenuBar(AppState* app) {
 
   if (ImGui::BeginMenu("Sketch")) {
     if (ImGui::MenuItem("New Sketch...")) {
+      int selectedPlaneId = defaultPlaneId(SketchPlane::XY);
+      if (!app->browserSelectedPlanes.empty()) {
+        const int planeIndex = app->browserSelectedPlanes.front();
+        if (planeIndex >= 0 && planeIndex < static_cast<int>(app->planes.size())) {
+          selectedPlaneId = app->planes[planeIndex].id;
+        }
+      }
       app->sketchCreate.open = true;
-      app->sketchCreate.pickFromScene = true;
-      app->sketchCreate.fromFace = false;
-      app->sketchCreate.sourceObject = -1;
+      app->sketchCreate.selectedPlaneId = selectedPlaneId;
       app->partialSelectedObject = -1;
-      app->status = "Click origin planes or an object face to set the sketch plane";
+      app->status = "Pick an existing plane from the scene, browser, or list";
+    }
+    if (ImGui::MenuItem("New Plane...", nullptr, false, app->sceneMode == SceneMode::View3D)) {
+      app->planeCreate.open = true;
+      app->planeCreate.source = PlaneReferenceSource::Plane;
+      app->planeCreate.sourcePlaneId = defaultPlaneId(SketchPlane::XY);
+      app->planeCreate.sourceObject = -1;
+      app->planeCreate.sourceFacePlane = SketchPlane::XY;
+      app->planeCreate.sourceFaceSign = 1;
+      std::snprintf(app->planeCreate.distanceBuffer, sizeof(app->planeCreate.distanceBuffer),
+                    "10.000");
+      if (!app->browserSelectedPlanes.empty()) {
+        const int planeIndex = app->browserSelectedPlanes.front();
+        if (planeIndex >= 0 && planeIndex < static_cast<int>(app->planes.size())) {
+          app->planeCreate.sourcePlaneId = app->planes[planeIndex].id;
+        }
+      }
+      app->status = "Create a new plane from an existing plane or selected face";
     }
     ImGui::Separator();
     if (ImGui::MenuItem("Exit Sketch", nullptr, false,
@@ -284,6 +460,25 @@ void drawSolidToolbar(AppState* app) {
                            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_AlwaysAutoResize;
   ImGui::Begin("##solidToolbar", nullptr, flags);
 
+  if (ImGui::Button("Plane")) {
+    app->planeCreate.open = true;
+    app->planeCreate.source = PlaneReferenceSource::Plane;
+    app->planeCreate.sourcePlaneId = defaultPlaneId(SketchPlane::XY);
+    if (!app->browserSelectedPlanes.empty()) {
+      const int planeIndex = app->browserSelectedPlanes.front();
+      if (planeIndex >= 0 && planeIndex < static_cast<int>(app->planes.size())) {
+        app->planeCreate.sourcePlaneId = app->planes[planeIndex].id;
+      }
+    }
+    app->planeCreate.sourceObject = -1;
+    app->planeCreate.sourceFacePlane = SketchPlane::XY;
+    app->planeCreate.sourceFaceSign = 1;
+    std::snprintf(app->planeCreate.distanceBuffer, sizeof(app->planeCreate.distanceBuffer),
+                  "10.000");
+    app->status = "Plane tool opened";
+  }
+
+  ImGui::SameLine();
   const bool hasSketch = !app->sketches.empty();
   if (!hasSketch) ImGui::BeginDisabled();
   if (ImGui::Button("Extrude")) {
@@ -337,49 +532,145 @@ void drawSolidToolbar(AppState* app) {
   ImGui::End();
 }
 
-void drawNewSketchWindow(AppState* app) {
-  if (!app->sketchCreate.open) return;
+void drawNewPlaneWindow(AppState* app) {
+  if (!app->planeCreate.open) return;
 
-  ImGui::SetNextWindowSize(ImVec2(420.0f, 0.0f), ImGuiCond_FirstUseEver);
-  if (!ImGui::Begin("New Sketch", &app->sketchCreate.open)) {
+  ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                          ImVec2(0.5f, 0.5f));
+  ImGui::SetNextWindowSize(ImVec2(460.0f, 0.0f), ImGuiCond_FirstUseEver);
+  bool open = app->planeCreate.open;
+  if (!ImGui::Begin("New Plane", &open)) {
     ImGui::End();
+    app->planeCreate.open = open;
     return;
   }
 
-  ImGui::TextWrapped("Pick a base plane from center axes or click a face on an object.");
-  ImGui::TextWrapped("Then set an optional offset and create the sketch.");
+  ImGui::TextWrapped("Create a reference plane from an existing plane or an object face.");
   ImGui::Separator();
 
-  const char* planeName = "XY";
-  if (app->sketchCreate.plane == SketchPlane::XZ) planeName = "XZ";
-  if (app->sketchCreate.plane == SketchPlane::YZ) planeName = "YZ";
-  ImGui::Text("Selected plane: %s", planeName);
-  if (app->sketchCreate.fromFace && app->sketchCreate.sourceObject >= 0) {
-    ImGui::Text("Source: Object %d face", app->sketchCreate.sourceObject + 1);
-  } else {
-    ImGui::TextUnformatted("Source: Center plane");
+  int sourceMode = static_cast<int>(app->planeCreate.source);
+  if (ImGui::Combo("Reference", &sourceMode, "Plane\0Face\0")) {
+    app->planeCreate.source = static_cast<PlaneReferenceSource>(sourceMode);
+    app->partialSelectedObject = -1;
   }
-  ImGui::InputFloat("Offset (mm)", &app->sketchCreate.offsetMm, 1.0f, 10.0f, "%.3f");
 
-  if (!app->sketchCreate.pickFromScene) {
-    if (ImGui::Button("Pick Plane From Scene", ImVec2(-1.0f, 0.0f))) {
-      app->sketchCreate.pickFromScene = true;
-      app->partialSelectedObject = -1;
-      app->status = "Click a center plane near origin or click an object face";
+  if (app->planeCreate.source == PlaneReferenceSource::Plane) {
+    if (app->browserSelectedPlanes.size() == 1) {
+      const int planeIndex = app->browserSelectedPlanes.front();
+      if (planeIndex >= 0 && planeIndex < static_cast<int>(app->planes.size())) {
+        app->planeCreate.sourcePlaneId = app->planes[planeIndex].id;
+      }
     }
+
+    const int planeIndex = findPlaneIndexById(app, app->planeCreate.sourcePlaneId);
+    if (planeIndex >= 0) {
+      ImGui::Text("Selected plane: %s", app->planes[planeIndex].meta.name.data());
+    } else {
+      ImGui::TextDisabled("Selected plane: none");
+    }
+    ImGui::TextDisabled("Select a plane by clicking a gizmo plane square or in Object Browser > Planes.");
   } else {
-    ImGui::TextDisabled("Picking active: click in viewport to choose plane");
-    if (ImGui::Button("Stop Picking", ImVec2(-1.0f, 0.0f))) {
-      app->sketchCreate.pickFromScene = false;
+    if (app->planeCreate.sourceObject >= 0) {
+      const std::string faceLabel = std::string(faceSignLabel(app->planeCreate.sourceFaceSign)) +
+                                    planeShortName(app->planeCreate.sourceFacePlane) +
+                                    " face of " +
+                                    objectName(app, app->planeCreate.sourceObject);
+      ImGui::Text("Selected face: %s", faceLabel.c_str());
+    } else {
+      ImGui::TextDisabled("Selected face: none");
+    }
+    ImGui::TextDisabled("Click a face in 3D view to set the source face.");
+  }
+
+  ImGui::Text("Offset Distance:");
+  ImGui::SameLine();
+  ImGui::SetNextItemWidth(140.0f);
+  ImGui::InputText("##planeDistance", app->planeCreate.distanceBuffer,
+                   sizeof(app->planeCreate.distanceBuffer));
+  ImGui::SameLine();
+  ImGui::TextDisabled("(%s)", unitSuffix(app->project.defaultUnit));
+
+  ImGui::Spacing();
+  if (ImGui::Button("Create Plane", ImVec2(160.0f, 0.0f))) {
+    auto parsed = parseDimension(std::string(app->planeCreate.distanceBuffer),
+                                 app->project.defaultUnit);
+    if (!parsed) {
+      app->status = "Plane: enter a valid distance";
+    } else if (app->planeCreate.source == PlaneReferenceSource::Plane) {
+      createOffsetPlaneFromPlane(app, app->planeCreate.sourcePlaneId, parsed->valueMm);
+      app->planeCreate.open = false;
+      app->status = "Plane created";
+    } else if (app->planeCreate.sourceObject < 0) {
+      app->status = "Plane: pick a source face first";
+    } else {
+      createOffsetPlaneFromFace(app, app->planeCreate.sourceObject,
+                                app->planeCreate.sourceFacePlane,
+                                app->planeCreate.sourceFaceSign,
+                                parsed->valueMm);
+      app->planeCreate.open = false;
       app->partialSelectedObject = -1;
+      app->status = "Plane created";
     }
   }
+  ImGui::SameLine();
+  if (ImGui::Button("Cancel", ImVec2(160.0f, 0.0f))) {
+    app->planeCreate = {};
+    app->partialSelectedObject = -1;
+    open = false;
+  }
+
+  ImGui::End();
+  app->planeCreate.open = open;
+  if (!app->planeCreate.open) {
+    app->partialSelectedObject = -1;
+  }
+}
+
+void drawNewSketchWindow(AppState* app) {
+  if (!app->sketchCreate.open) return;
+
+  ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                          ImVec2(0.5f, 0.5f));
+  ImGui::SetNextWindowSize(ImVec2(420.0f, 0.0f), ImGuiCond_FirstUseEver);
+  bool open = app->sketchCreate.open;
+  if (!ImGui::Begin("New Sketch", &open)) {
+    ImGui::End();
+    app->sketchCreate.open = open;
+    return;
+  }
+
+  ImGui::TextWrapped("Select an existing plane for the new sketch.");
+  ImGui::Separator();
+
+  if (app->browserSelectedPlanes.size() == 1) {
+    const int planeIndex = app->browserSelectedPlanes.front();
+    if (planeIndex >= 0 && planeIndex < static_cast<int>(app->planes.size())) {
+      app->sketchCreate.selectedPlaneId = app->planes[planeIndex].id;
+    }
+  }
+
+  std::vector<const char*> names;
+  std::vector<int> ids;
+  names.reserve(app->planes.size());
+  ids.reserve(app->planes.size());
+  int current = 0;
+  for (int i = 0; i < static_cast<int>(app->planes.size()); ++i) {
+    names.push_back(app->planes[i].meta.name.data());
+    ids.push_back(app->planes[i].id);
+    if (app->planes[i].id == app->sketchCreate.selectedPlaneId) {
+      current = i;
+    }
+  }
+  if (!names.empty() &&
+      ImGui::Combo("Plane", &current, names.data(), static_cast<int>(names.size()))) {
+    app->sketchCreate.selectedPlaneId = ids[current];
+  }
+  ImGui::TextDisabled("You can also pick a plane by clicking a gizmo plane square or in Object Browser > Planes.");
 
   ImGui::Spacing();
   if (ImGui::Button("Create Sketch", ImVec2(150.0f, 0.0f))) {
-    createSketch(app, app->sketchCreate.plane, app->sketchCreate.offsetMm);
-    app->sketchCreate.open = false;
-    app->sketchCreate.pickFromScene = false;
+    createSketch(app, app->sketchCreate.selectedPlaneId);
+    open = false;
     app->partialSelectedObject = -1;
     app->status = "Sketch created";
   }
@@ -387,9 +678,14 @@ void drawNewSketchWindow(AppState* app) {
   if (ImGui::Button("Cancel", ImVec2(150.0f, 0.0f))) {
     app->sketchCreate = {};
     app->partialSelectedObject = -1;
+    open = false;
   }
 
   ImGui::End();
+  app->sketchCreate.open = open;
+  if (!app->sketchCreate.open) {
+    app->partialSelectedObject = -1;
+  }
 }
 
 void drawProjectToolWindow(AppState* app) {
@@ -397,6 +693,8 @@ void drawProjectToolWindow(AppState* app) {
     return;
   }
 
+  ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                          ImVec2(0.5f, 0.5f));
   ImGui::SetNextWindowSize(ImVec2(380.0f, 0.0f), ImGuiCond_FirstUseEver);
   if (!ImGui::Begin("Project Tool", &app->showProjectTool)) {
     ImGui::End();
@@ -482,9 +780,15 @@ void drawProjectToolWindow(AppState* app) {
 }
 
 void drawPanel(AppState* app) {
-  ImGui::SetNextWindowPos(ImVec2(12.0f, 12.0f), ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowSize(ImVec2(240.0f, 0.0f), ImGuiCond_FirstUseEver);
+  const ImVec2 vpPos = uiViewportPos();
+  const ImVec2 vpSize = uiViewportSize();
+  const float top = vpPos.y + uiTopBarHeight();
+  ImGui::SetNextWindowPos(ImVec2(vpPos.x + 12.0f, top), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSize(ImVec2(280.0f, 300.0f), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSizeConstraints(ImVec2(240.0f, 220.0f),
+                                      ImVec2(420.0f, vpSize.y * 0.7f));
   ImGui::Begin("Actions");
+  snapCurrentWindowToGuides(uiTopBarHeight());
 
   if (ImGui::Button("Open", ImVec2(-1.0f, 0.0f))) {
     if (!app->loadingMesh && !app->fileBrowser.isVisible()) {
@@ -540,6 +844,11 @@ void drawPanel(AppState* app) {
   }
 
   ImGui::Separator();
+  if (ImGui::Button("Reset Window Layout", ImVec2(-1.0f, 0.0f))) {
+    app->status = "Docked layout is active";
+  }
+
+  ImGui::Separator();
   ImGui::TextWrapped("Status: %s", app->status.c_str());
   ImGui::End();
 }
@@ -547,6 +856,8 @@ void drawPanel(AppState* app) {
 void drawAppSettingsWindow(AppState* app) {
   if (!app->showAppSettings) return;
 
+  ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                          ImVec2(0.5f, 0.5f));
   ImGui::SetNextWindowSize(ImVec2(360, 0), ImGuiCond_FirstUseEver);
   if (ImGui::Begin("Application Settings", &app->showAppSettings)) {
     ImGui::TextWrapped("These defaults apply to new projects.");
@@ -572,6 +883,8 @@ void drawAppSettingsWindow(AppState* app) {
 void drawProjectSettingsWindow(AppState* app) {
   if (!app->showProjectSettings) return;
 
+  ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                          ImVec2(0.5f, 0.5f));
   ImGui::SetNextWindowSize(ImVec2(360, 0), ImGuiCond_FirstUseEver);
   if (ImGui::Begin("Project Settings", &app->showProjectSettings)) {
     ImGui::TextWrapped("Settings for the current project.");
@@ -592,9 +905,16 @@ void drawProjectSettingsWindow(AppState* app) {
 }
 
 void drawObjectBrowserWindow(AppState* app) {
-  ImGui::SetNextWindowPos(ImVec2(12.0f, 320.0f), ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowSize(ImVec2(320.0f, 0.0f), ImGuiCond_FirstUseEver);
+  const ImVec2 vpPos = uiViewportPos();
+  const ImVec2 vpSize = uiViewportSize();
+  const float top = vpPos.y + uiTopBarHeight() + 312.0f;
+  const float usableHeight = std::max(240.0f, vpSize.y - (top - vpPos.y) - 12.0f);
+  ImGui::SetNextWindowPos(ImVec2(vpPos.x + 12.0f, top), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSize(ImVec2(360.0f, usableHeight), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSizeConstraints(ImVec2(300.0f, 220.0f),
+                                      ImVec2(vpSize.x * 0.5f, vpSize.y - 40.0f));
   ImGui::Begin("Object Browser");
+  snapCurrentWindowToGuides(uiTopBarHeight());
 
   const bool multiSelect = ImGui::GetIO().KeyCtrl;
   const bool browserFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
@@ -616,8 +936,8 @@ void drawObjectBrowserWindow(AppState* app) {
                           ImGuiTableFlags_RowBg |
                               ImGuiTableFlags_BordersInnerV |
                               ImGuiTableFlags_SizingStretchProp)) {
-      ImGui::TableSetupColumn("V", ImGuiTableColumnFlags_WidthFixed, 24.0f);
-      ImGui::TableSetupColumn("L", ImGuiTableColumnFlags_WidthFixed, 24.0f);
+      ImGui::TableSetupColumn("V", ImGuiTableColumnFlags_WidthFixed, 28.0f);
+      ImGui::TableSetupColumn("L", ImGuiTableColumnFlags_WidthFixed, 28.0f);
       ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
       ImGui::TableHeadersRow();
 
@@ -636,12 +956,12 @@ void drawObjectBrowserWindow(AppState* app) {
         ImGui::PushID(i);
 
         ImGui::TableSetColumnIndex(0);
-        if (ImGui::Checkbox("##objvis", &meta.visible)) {
+        if (visibilityIconToggle("##objvis", &meta.visible)) {
           rebuildCombinedMesh(app);
         }
 
         ImGui::TableSetColumnIndex(1);
-        ImGui::Checkbox("##objlock", &meta.locked);
+        lockIconToggle("##objlock", &meta.locked);
 
         ImGui::TableSetColumnIndex(2);
         if (renameInline) {
@@ -688,6 +1008,29 @@ void drawObjectBrowserWindow(AppState* app) {
             beginObjectRename(app, i);
             app->browserFocusSection = BrowserSection::Objects;
           }
+          if (ImGui::BeginPopupContextItem("##objctx")) {
+            app->browserSelectedObjects.assign(1, i);
+            app->objectSelectionAnchor = i;
+            syncSelectedObjectFromBrowser(app);
+            app->browserFocusSection = BrowserSection::Objects;
+
+            if (ImGui::MenuItem("Rename")) {
+              beginObjectRename(app, i);
+            }
+            if (ImGui::MenuItem(meta.visible ? "Hide" : "Show")) {
+              meta.visible = !meta.visible;
+              rebuildCombinedMesh(app);
+            }
+            if (ImGui::MenuItem(meta.locked ? "Unlock" : "Lock")) {
+              meta.locked = !meta.locked;
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Delete", nullptr, false, !meta.locked)) {
+              app->pendingDeleteObjects.assign(1, i);
+              app->openDeleteObjectsPopup = true;
+            }
+            ImGui::EndPopup();
+          }
         }
 
         ImGui::PopID();
@@ -700,13 +1043,97 @@ void drawObjectBrowserWindow(AppState* app) {
     }
   }
 
+  if (ImGui::CollapsingHeader("Planes", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ImGui::BeginTable("##planesTable", 3,
+                          ImGuiTableFlags_RowBg |
+                              ImGuiTableFlags_BordersInnerV |
+                              ImGuiTableFlags_SizingStretchProp)) {
+      ImGui::TableSetupColumn("V", ImGuiTableColumnFlags_WidthFixed, 28.0f);
+      ImGui::TableSetupColumn("L", ImGuiTableColumnFlags_WidthFixed, 28.0f);
+      ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableHeadersRow();
+
+      for (int i = 0; i < static_cast<int>(app->planes.size()); ++i) {
+        auto& meta = app->planes[i].meta;
+        const bool selected = hasIndex(app->browserSelectedPlanes, i);
+
+        ImGui::TableNextRow();
+        const ImU32 rowTint = tintRow(meta.visible, meta.locked);
+        if (rowTint != 0) {
+          ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, rowTint);
+        }
+        ImGui::PushID(2000 + i);
+
+        ImGui::TableSetColumnIndex(0);
+        visibilityIconToggle("##plvis", &meta.visible);
+
+        ImGui::TableSetColumnIndex(1);
+        lockIconToggle("##pllock", &meta.locked, !meta.builtIn);
+
+        ImGui::TableSetColumnIndex(2);
+        std::string label = meta.name.data();
+        const char* state = browserRowLabel(meta.visible, meta.locked);
+        if (state[0] != '\0') {
+          label += " ";
+          label += state;
+        }
+        if (ImGui::Selectable(label.c_str(), selected,
+                              ImGuiSelectableFlags_SpanAllColumns)) {
+          const bool shiftClick = ImGui::GetIO().KeyShift;
+          if (shiftClick && app->planeSelectionAnchor >= 0) {
+            setSelectionRange(app->browserSelectedPlanes, app->planeSelectionAnchor, i);
+          } else {
+            setSingleOrMultiSelection(app->browserSelectedPlanes, i, multiSelect);
+            app->planeSelectionAnchor = i;
+          }
+          syncSelectedPlaneFromBrowser(app);
+          app->browserFocusSection = BrowserSection::Planes;
+        }
+        if (ImGui::BeginPopupContextItem("##plctx")) {
+          app->browserSelectedPlanes.assign(1, i);
+          app->planeSelectionAnchor = i;
+          syncSelectedPlaneFromBrowser(app);
+          app->browserFocusSection = BrowserSection::Planes;
+
+          if (ImGui::MenuItem(meta.visible ? "Hide" : "Show")) {
+            meta.visible = !meta.visible;
+          }
+          if (ImGui::MenuItem(meta.locked ? "Unlock" : "Lock", nullptr, false,
+                              !meta.builtIn)) {
+            meta.locked = !meta.locked;
+          }
+          ImGui::Separator();
+          if (ImGui::MenuItem("New Sketch on Plane")) {
+            app->sketchCreate.open = true;
+            app->sketchCreate.selectedPlaneId = app->planes[i].id;
+            app->status = "Create sketch on selected plane";
+          }
+          if (ImGui::MenuItem("Offset Plane from This")) {
+            app->planeCreate.open = true;
+            app->planeCreate.source = PlaneReferenceSource::Plane;
+            app->planeCreate.sourcePlaneId = app->planes[i].id;
+            app->status = "Create offset plane from selected plane";
+          }
+          ImGui::EndPopup();
+        }
+
+        ImGui::PopID();
+      }
+
+      ImGui::EndTable();
+    }
+    if (app->planes.empty()) {
+      ImGui::TextDisabled("(no planes)");
+    }
+  }
+
   if (ImGui::CollapsingHeader("Sketches", ImGuiTreeNodeFlags_DefaultOpen)) {
     if (ImGui::BeginTable("##sketchesTable", 3,
                           ImGuiTableFlags_RowBg |
                               ImGuiTableFlags_BordersInnerV |
                               ImGuiTableFlags_SizingStretchProp)) {
-      ImGui::TableSetupColumn("V", ImGuiTableColumnFlags_WidthFixed, 24.0f);
-      ImGui::TableSetupColumn("L", ImGuiTableColumnFlags_WidthFixed, 24.0f);
+      ImGui::TableSetupColumn("V", ImGuiTableColumnFlags_WidthFixed, 28.0f);
+      ImGui::TableSetupColumn("L", ImGuiTableColumnFlags_WidthFixed, 28.0f);
       ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
       ImGui::TableHeadersRow();
 
@@ -728,10 +1155,10 @@ void drawObjectBrowserWindow(AppState* app) {
         ImGui::PushID(1000 + i);
 
         ImGui::TableSetColumnIndex(0);
-        const bool changedVisibility = ImGui::Checkbox("##skvis", &meta.visible);
+        const bool changedVisibility = visibilityIconToggle("##skvis", &meta.visible);
 
         ImGui::TableSetColumnIndex(1);
-        const bool changedLock = ImGui::Checkbox("##sklock", &meta.locked);
+        const bool changedLock = lockIconToggle("##sklock", &meta.locked);
 
         ImGui::TableSetColumnIndex(2);
         if (renameInline) {
@@ -786,6 +1213,37 @@ void drawObjectBrowserWindow(AppState* app) {
             app->status = "Jumped to sketch creation point in timeline";
             app->browserFocusSection = BrowserSection::Sketches;
           }
+          if (ImGui::BeginPopupContextItem("##skctx")) {
+            app->browserSelectedSketches.assign(1, i);
+            app->sketchSelectionAnchor = i;
+            syncSelectedSketchFromBrowser(app);
+            app->browserFocusSection = BrowserSection::Sketches;
+
+            if (ImGui::MenuItem("Rename")) {
+              beginSketchRename(app, i);
+            }
+            if (ImGui::MenuItem(meta.visible ? "Hide" : "Show")) {
+              meta.visible = !meta.visible;
+            }
+            if (ImGui::MenuItem(meta.locked ? "Unlock" : "Lock")) {
+              meta.locked = !meta.locked;
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Edit Sketch")) {
+              app->browserSelectedSketches.assign(1, i);
+              app->sketchSelectionAnchor = i;
+              syncSelectedSketchFromBrowser(app);
+              const int createEntryIndex = findCreateEntryIndexForSketch(app->timeline, i);
+              if (createEntryIndex >= 0) {
+                app->timelineCursor = createEntryIndex;
+              }
+              app->sceneMode = SceneMode::Sketch;
+              if (app->hasActiveSketch()) {
+                snapCameraToPlane(app, app->activePlane());
+              }
+            }
+            ImGui::EndPopup();
+          }
         }
 
         if ((changedVisibility || changedLock) &&
@@ -838,6 +1296,22 @@ void drawObjectBrowserWindow(AppState* app) {
           }
         }
         syncSelectedObjectFromBrowser(app);
+      } else if (app->browserFocusSection == BrowserSection::Planes) {
+        const int count = static_cast<int>(app->planes.size());
+        if (ImGui::GetIO().KeyShift && count > 0) {
+          int anchor = app->planeSelectionAnchor >= 0 ? app->planeSelectionAnchor :
+                       (app->browserSelectedPlanes.empty() ? 0 : app->browserSelectedPlanes.front());
+          int current = app->browserSelectedPlanes.empty() ? anchor : app->browserSelectedPlanes.front();
+          current = std::clamp(current - 1, 0, count - 1);
+          app->planeSelectionAnchor = anchor;
+          setSelectionRange(app->browserSelectedPlanes, anchor, current);
+        } else {
+          stepSelection(app->browserSelectedPlanes, count, -1);
+          if (!app->browserSelectedPlanes.empty()) {
+            app->planeSelectionAnchor = app->browserSelectedPlanes.front();
+          }
+        }
+        syncSelectedPlaneFromBrowser(app);
       } else {
         const int count = (app->sceneMode == SceneMode::Sketch && app->hasActiveSketch())
                               ? (app->activeSketchIndex + 1)
@@ -876,6 +1350,22 @@ void drawObjectBrowserWindow(AppState* app) {
           }
         }
         syncSelectedObjectFromBrowser(app);
+      } else if (app->browserFocusSection == BrowserSection::Planes) {
+        const int count = static_cast<int>(app->planes.size());
+        if (ImGui::GetIO().KeyShift && count > 0) {
+          int anchor = app->planeSelectionAnchor >= 0 ? app->planeSelectionAnchor :
+                       (app->browserSelectedPlanes.empty() ? 0 : app->browserSelectedPlanes.front());
+          int current = app->browserSelectedPlanes.empty() ? anchor : app->browserSelectedPlanes.front();
+          current = std::clamp(current + 1, 0, count - 1);
+          app->planeSelectionAnchor = anchor;
+          setSelectionRange(app->browserSelectedPlanes, anchor, current);
+        } else {
+          stepSelection(app->browserSelectedPlanes, count, 1);
+          if (!app->browserSelectedPlanes.empty()) {
+            app->planeSelectionAnchor = app->browserSelectedPlanes.front();
+          }
+        }
+        syncSelectedPlaneFromBrowser(app);
       } else {
         const int count = (app->sceneMode == SceneMode::Sketch && app->hasActiveSketch())
                               ? (app->activeSketchIndex + 1)
@@ -951,12 +1441,21 @@ void drawObjectBrowserWindow(AppState* app) {
 }
 
 void drawTimelineWindow(AppState* app) {
-  ImGui::SetNextWindowPos(ImVec2(350.0f, 320.0f), ImGuiCond_FirstUseEver);
-  ImGui::SetNextWindowSize(ImVec2(420.0f, 260.0f), ImGuiCond_FirstUseEver);
+  const ImVec2 vpPos = uiViewportPos();
+  const ImVec2 vpSize = uiViewportSize();
+  const float top = vpPos.y + uiTopBarHeight();
+  const float width = 460.0f;
+  ImGui::SetNextWindowPos(ImVec2(vpPos.x + vpSize.x - width - 12.0f, top),
+                          ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSize(ImVec2(width, std::max(240.0f, vpSize.y * 0.42f)),
+                           ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowSizeConstraints(ImVec2(360.0f, 200.0f),
+                                      ImVec2(vpSize.x - 80.0f, vpSize.y - 40.0f));
   if (!ImGui::Begin("History Timeline")) {
     ImGui::End();
     return;
   }
+  snapCurrentWindowToGuides(uiTopBarHeight());
 
   const auto& entries = app->timeline.entries();
   if (entries.empty()) {
@@ -996,6 +1495,8 @@ void drawSolidExtrudeWindow(AppState* app) {
   if (!app->solidExtrudeOptions.visible) return;
   if (app->sceneMode != SceneMode::View3D) return;
 
+  ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                          ImVec2(0.5f, 0.5f));
   ImGui::SetNextWindowSize(ImVec2(520.0f, 0.0f), ImGuiCond_FirstUseEver);
   bool open = app->solidExtrudeOptions.visible;
   if (ImGui::Begin("3D Extrude", &open)) {
@@ -1121,6 +1622,8 @@ void drawExtrudeOptionsWindow(AppState* app) {
   }
 
   ImGui::SetNextWindowSize(ImVec2(460.0f, 0.0f), ImGuiCond_FirstUseEver);
+  ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                          ImVec2(0.5f, 0.5f));
   bool open = app->extrudeOptions.visible;
   if (ImGui::Begin("Extrude Options", &open)) {
     int op = static_cast<int>(app->extrudeOptions.operation);
@@ -1235,6 +1738,8 @@ void drawExtrudeOptionsWindow(AppState* app) {
 void drawCombineWindow(AppState* app) {
   if (!app->combineOptions.visible) return;
 
+  ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                          ImVec2(0.5f, 0.5f));
   ImGui::SetNextWindowSize(ImVec2(520.0f, 0.0f), ImGuiCond_FirstUseEver);
   bool open = app->combineOptions.visible;
   if (ImGui::Begin("Combine Tool", &open)) {
@@ -1314,6 +1819,8 @@ void drawCombineWindow(AppState* app) {
 void drawChamferWindow(AppState* app) {
   if (!app->chamferOptions.visible) return;
 
+  ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                          ImVec2(0.5f, 0.5f));
   ImGui::SetNextWindowSize(ImVec2(520.0f, 0.0f), ImGuiCond_FirstUseEver);
   bool open = app->chamferOptions.visible;
   if (ImGui::Begin("Chamfer Tool", &open)) {

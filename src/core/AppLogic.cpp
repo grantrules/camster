@@ -61,6 +61,67 @@ float rayTriangle(glm::vec3 origin, glm::vec3 dir, glm::vec3 v0, glm::vec3 v1, g
   const float t = f * glm::dot(e2, q);
   return t > 1e-6f ? t : -1.0f;
 }
+
+float faceOffsetForBox(const Aabb& box, SketchPlane plane, int faceSign) {
+  const bool positive = faceSign >= 0;
+  switch (plane) {
+    case SketchPlane::XY: return positive ? box.max.z : box.min.z;
+    case SketchPlane::XZ: return positive ? box.max.y : box.min.y;
+    case SketchPlane::YZ: return positive ? box.max.x : box.min.x;
+  }
+  return 0.0f;
+}
+
+int findObjectIndexByName(const AppState* app, const std::string& name) {
+  for (int i = 0; i < static_cast<int>(app->sceneObjectMeta.size()); ++i) {
+    if (std::string(app->sceneObjectMeta[i].name.data()) == name) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+ResolvedPlane resolvePlaneRecursive(const AppState* app, int planeId, int depth) {
+  if (!app || depth > 16) return {};
+  const int planeIndex = findPlaneIndexById(app, planeId);
+  if (planeIndex < 0) return {};
+
+  const PlaneEntry& entry = app->planes[planeIndex];
+  ResolvedPlane resolved;
+  resolved.plane = entry.reference.plane;
+  resolved.valid = true;
+
+  switch (entry.reference.kind) {
+    case PlaneReferenceKind::Principal:
+      resolved.offsetMm = entry.reference.offsetMm;
+      return resolved;
+
+    case PlaneReferenceKind::OffsetFromPlane: {
+      const ResolvedPlane parent = resolvePlaneRecursive(app, entry.reference.parentPlaneId,
+                                                         depth + 1);
+      if (!parent.valid) return {};
+      resolved.plane = parent.plane;
+      resolved.offsetMm = parent.offsetMm + entry.reference.distanceMm;
+      return resolved;
+    }
+
+    case PlaneReferenceKind::OffsetFromFace: {
+      const int objectIndex = findObjectIndexByName(app, entry.reference.sourceObjectName);
+      if (objectIndex < 0 || objectIndex >= static_cast<int>(app->sceneObjects.size())) {
+        return {};
+      }
+      const Aabb box = meshAabb(app->sceneObjects[objectIndex]);
+      if (!box.valid) return {};
+      resolved.offsetMm = faceOffsetForBox(box, entry.reference.plane,
+                                           entry.reference.faceSign) +
+                          static_cast<float>(entry.reference.faceSign) *
+                              entry.reference.distanceMm;
+      return resolved;
+    }
+  }
+
+  return {};
+}
 }  // namespace
 
 const char* browserRowLabel(bool visible, bool locked) {
@@ -137,6 +198,15 @@ void syncSelectedObjectFromBrowser(AppState* app) {
   }
 }
 
+void syncSelectedPlaneFromBrowser(AppState* app) {
+  sanitizeObjectIndices(app->browserSelectedPlanes, static_cast<int>(app->planes.size()));
+  if (app->browserSelectedPlanes.empty() ||
+      app->browserSelectedPlanes.size() != 1 ||
+      !hasIndex(app->browserSelectedPlanes, app->renamePlaneIndex)) {
+    app->renamePlaneIndex = -1;
+  }
+}
+
 void syncSelectedSketchFromBrowser(AppState* app) {
   sanitizeObjectIndices(app->browserSelectedSketches, static_cast<int>(app->sketches.size()));
   if (app->browserSelectedSketches.empty()) {
@@ -146,6 +216,7 @@ void syncSelectedSketchFromBrowser(AppState* app) {
   if (app->browserSelectedSketches.size() == 1) {
     app->activeSketchIndex = app->browserSelectedSketches.front();
     app->sceneMode = SceneMode::Sketch;
+    syncSketchPlanes(app);
     if (app->hasActiveSketch()) {
       snapCameraToPlane(app, app->activePlane());
     }
@@ -154,6 +225,72 @@ void syncSelectedSketchFromBrowser(AppState* app) {
       !hasIndex(app->browserSelectedSketches, app->renameSketchIndex)) {
     app->renameSketchIndex = -1;
   }
+}
+
+void initializeDefaultPlanes(AppState* app) {
+  app->planes.clear();
+  app->browserSelectedPlanes.clear();
+  app->planeSelectionAnchor = -1;
+  app->renamePlaneIndex = -1;
+  app->nextPlaneId = 1;
+  app->nextPlaneNumber = 1;
+
+  const std::array<std::pair<SketchPlane, const char*>, 3> defaults = {{
+      {SketchPlane::XY, "XY"},
+      {SketchPlane::XZ, "XZ"},
+      {SketchPlane::YZ, "YZ"},
+  }};
+
+  for (const auto& [plane, name] : defaults) {
+    PlaneEntry entry;
+    entry.id = defaultPlaneId(plane);
+    setName(entry.meta.name, name);
+    entry.meta.visible = false;
+    entry.meta.locked = true;
+    entry.meta.builtIn = true;
+    entry.reference.kind = PlaneReferenceKind::Principal;
+    entry.reference.plane = plane;
+    entry.reference.offsetMm = 0.0f;
+    app->planes.push_back(std::move(entry));
+    app->nextPlaneId = std::max(app->nextPlaneId, defaultPlaneId(plane) + 1);
+  }
+}
+
+int defaultPlaneId(SketchPlane plane) {
+  switch (plane) {
+    case SketchPlane::XY: return 1;
+    case SketchPlane::XZ: return 2;
+    case SketchPlane::YZ: return 3;
+  }
+  return 1;
+}
+
+int findPlaneIndexById(const AppState* app, int planeId) {
+  if (!app || planeId < 0) return -1;
+  for (int i = 0; i < static_cast<int>(app->planes.size()); ++i) {
+    if (app->planes[i].id == planeId) return i;
+  }
+  return -1;
+}
+
+ResolvedPlane resolvePlane(const AppState* app, int planeId) {
+  return resolvePlaneRecursive(app, planeId, 0);
+}
+
+void syncSketchPlanes(AppState* app) {
+  for (auto& sketch : app->sketches) {
+    const ResolvedPlane resolved = resolvePlane(app, sketch.planeId);
+    if (!resolved.valid) continue;
+    sketch.plane = resolved.plane;
+    sketch.offsetMm = resolved.offsetMm;
+  }
+}
+
+std::string planeName(const AppState* app, int planeIndex) {
+  if (!app || planeIndex < 0 || planeIndex >= static_cast<int>(app->planes.size())) {
+    return {};
+  }
+  return std::string(app->planes[planeIndex].meta.name.data());
 }
 
 void clearSketches(AppState* app) {
@@ -192,17 +329,20 @@ std::vector<std::string> objectNames(const AppState* app, const std::vector<int>
   return names;
 }
 
-void createSketch(AppState* app, SketchPlane plane, float offsetMm) {
+void createSketch(AppState* app, int planeId) {
+  const ResolvedPlane resolved = resolvePlane(app, planeId);
+  if (!resolved.valid) return;
+
   SketchEntry entry;
   setName(entry.meta.name, "Sketch " + std::to_string(app->nextSketchNumber++));
   entry.meta.visible = true;
   entry.meta.locked = false;
-  entry.plane = plane;
-  entry.offsetMm = offsetMm;
+  entry.planeId = planeId;
+  entry.plane = resolved.plane;
+  entry.offsetMm = resolved.offsetMm;
 
   CreateSketchAction action;
-  action.plane = plane;
-  action.offsetMm = offsetMm;
+  action.planeId = planeId;
   action.name = std::string(entry.meta.name.data());
   app->timeline.push(std::move(action), "Create " + std::string(entry.meta.name.data()));
   app->timelineCursor = app->timeline.size() - 1;
@@ -214,7 +354,64 @@ void createSketch(AppState* app, SketchPlane plane, float offsetMm) {
   app->sceneMode = SceneMode::Sketch;
   app->showProjectTool = true;
   app->partialSelectedObject = -1;
-  snapCameraToPlane(app, plane);
+  snapCameraToPlane(app, resolved.plane);
+}
+
+void createOffsetPlaneFromPlane(AppState* app, int parentPlaneId, float distanceMm) {
+  const ResolvedPlane parent = resolvePlane(app, parentPlaneId);
+  if (!parent.valid) return;
+
+  PlaneEntry entry;
+  entry.id = app->nextPlaneId++;
+  setName(entry.meta.name, "Plane " + std::to_string(app->nextPlaneNumber++));
+  entry.meta.visible = true;
+  entry.meta.locked = false;
+  entry.meta.builtIn = false;
+  entry.reference.kind = PlaneReferenceKind::OffsetFromPlane;
+  entry.reference.plane = parent.plane;
+  entry.reference.parentPlaneId = parentPlaneId;
+  entry.reference.distanceMm = distanceMm;
+
+  CreatePlaneAction action;
+  action.planeId = entry.id;
+  action.reference = entry.reference;
+  action.name = std::string(entry.meta.name.data());
+  app->timeline.push(std::move(action), "Create " + std::string(entry.meta.name.data()));
+  app->timelineCursor = app->timeline.size() - 1;
+
+  app->planes.push_back(std::move(entry));
+  app->browserSelectedPlanes.assign(1, static_cast<int>(app->planes.size()) - 1);
+  app->planeSelectionAnchor = static_cast<int>(app->planes.size()) - 1;
+}
+
+void createOffsetPlaneFromFace(AppState* app, int sourceObjectIndex,
+                               SketchPlane plane, int faceSign, float distanceMm) {
+  if (sourceObjectIndex < 0 || sourceObjectIndex >= static_cast<int>(app->sceneObjectMeta.size())) {
+    return;
+  }
+
+  PlaneEntry entry;
+  entry.id = app->nextPlaneId++;
+  setName(entry.meta.name, "Plane " + std::to_string(app->nextPlaneNumber++));
+  entry.meta.visible = true;
+  entry.meta.locked = false;
+  entry.meta.builtIn = false;
+  entry.reference.kind = PlaneReferenceKind::OffsetFromFace;
+  entry.reference.plane = plane;
+  entry.reference.sourceObjectName = objectName(app, sourceObjectIndex);
+  entry.reference.faceSign = faceSign >= 0 ? 1 : -1;
+  entry.reference.distanceMm = distanceMm;
+
+  CreatePlaneAction action;
+  action.planeId = entry.id;
+  action.reference = entry.reference;
+  action.name = std::string(entry.meta.name.data());
+  app->timeline.push(std::move(action), "Create " + std::string(entry.meta.name.data()));
+  app->timelineCursor = app->timeline.size() - 1;
+
+  app->planes.push_back(std::move(entry));
+  app->browserSelectedPlanes.assign(1, static_cast<int>(app->planes.size()) - 1);
+  app->planeSelectionAnchor = static_cast<int>(app->planes.size()) - 1;
 }
 
 void appendSceneObject(AppState* app, StlMesh mesh) {
@@ -260,7 +457,15 @@ void commitObjectRename(AppState* app) {
     app->renameObjectIndex = -1;
     return;
   }
+  const std::string oldName = app->sceneObjectMeta[app->renameObjectIndex].name.data();
   setName(app->sceneObjectMeta[app->renameObjectIndex].name, app->renameBuffer.data());
+  const std::string newName = app->sceneObjectMeta[app->renameObjectIndex].name.data();
+  for (auto& plane : app->planes) {
+    if (plane.reference.kind == PlaneReferenceKind::OffsetFromFace &&
+        plane.reference.sourceObjectName == oldName) {
+      plane.reference.sourceObjectName = newName;
+    }
+  }
   app->renameObjectIndex = -1;
 }
 
@@ -276,6 +481,7 @@ void commitSketchRename(AppState* app) {
 
 void cancelBrowserRename(AppState* app) {
   app->renameObjectIndex = -1;
+  app->renamePlaneIndex = -1;
   app->renameSketchIndex = -1;
 }
 
