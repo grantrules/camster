@@ -296,42 +296,6 @@ float uiTopBarHeight() {
   return ImGui::GetFrameHeight() * 2.0f + 8.0f;
 }
 
-void snapCurrentWindowToGuides(float topInset) {
-  const ImGuiViewport* vp = ImGui::GetMainViewport();
-  if (!vp) return;
-  if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) return;
-  if (!ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows)) return;
-
-  ImVec2 pos = ImGui::GetWindowPos();
-  const ImVec2 size = ImGui::GetWindowSize();
-  const float threshold = 18.0f;
-
-  const float left = vp->WorkPos.x + 12.0f;
-  const float right = vp->WorkPos.x + vp->WorkSize.x - size.x - 12.0f;
-  const float top = vp->WorkPos.y + topInset;
-  const float bottom = vp->WorkPos.y + vp->WorkSize.y - size.y - 12.0f;
-
-  bool snapped = false;
-  if (std::abs(pos.x - left) <= threshold) {
-    pos.x = left;
-    snapped = true;
-  } else if (std::abs(pos.x - right) <= threshold) {
-    pos.x = right;
-    snapped = true;
-  }
-
-  if (std::abs(pos.y - top) <= threshold) {
-    pos.y = top;
-    snapped = true;
-  } else if (std::abs(pos.y - bottom) <= threshold) {
-    pos.y = bottom;
-    snapped = true;
-  }
-
-  if (snapped) {
-    ImGui::SetWindowPos(pos, ImGuiCond_Always);
-  }
-}
 }  // namespace
 
 void drawMenuBar(AppState* app) {
@@ -788,7 +752,6 @@ void drawPanel(AppState* app) {
   ImGui::SetNextWindowSizeConstraints(ImVec2(240.0f, 220.0f),
                                       ImVec2(420.0f, vpSize.y * 0.7f));
   ImGui::Begin("Actions");
-  snapCurrentWindowToGuides(uiTopBarHeight());
 
   if (ImGui::Button("Open", ImVec2(-1.0f, 0.0f))) {
     if (!app->loadingMesh && !app->fileBrowser.isVisible()) {
@@ -914,7 +877,6 @@ void drawObjectBrowserWindow(AppState* app) {
   ImGui::SetNextWindowSizeConstraints(ImVec2(300.0f, 220.0f),
                                       ImVec2(vpSize.x * 0.5f, vpSize.y - 40.0f));
   ImGui::Begin("Object Browser");
-  snapCurrentWindowToGuides(uiTopBarHeight());
 
   const bool multiSelect = ImGui::GetIO().KeyCtrl;
   const bool browserFocused = ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows);
@@ -1459,7 +1421,6 @@ void drawTimelineWindow(AppState* app) {
     ImGui::End();
     return;
   }
-  snapCurrentWindowToGuides(uiTopBarHeight());
 
   const auto& entries = app->timeline.entries();
   if (entries.empty()) {
