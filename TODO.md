@@ -11,7 +11,7 @@
 - [x] Sketch entities: line, arc, circle, rectangle, polyline
 - [x] Constraint set: coincident, H/V, parallel, perpendicular, equal, dimensions
 - [x] Constraint conflict detection/reporting
-- [ ] Timeline-integrated sketch editing lifecycle
+- [x] Timeline-integrated sketch editing lifecycle
 
 ## M3: Solid Modeling v1
 - [ ] Feature set: extrude, revolve, sweep, loft, shell, draft

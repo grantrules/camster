@@ -331,6 +331,18 @@ int main() {
       app.status = "Exited sketch mode";
     }
 
+    auto recordActiveSketchEdit = [&app]() {
+      if (!app.hasActiveSketch()) return;
+      EditSketchAction action;
+      action.sketchIndex = app.activeSketchIndex;
+      action.sketchName = std::string(app.activeSketchMeta().name.data());
+      action.elements = app.activeSketch().elements();
+      action.constraints = app.activeSketch().constraints();
+      app.timeline.push(std::move(action),
+                        "Edit " + std::string(app.activeSketchMeta().name.data()));
+      app.timelineCursor = app.timeline.size() - 1;
+    };
+
     // Handle "Extrude" button press: gather profiles from selection.
     if (toolbarAction.extrudeRequested && !app.extrudeTool.active() && app.hasActiveSketch()) {
       if (!app.activeSketchVisible()) {
@@ -377,6 +389,7 @@ int main() {
       } else {
         app.activeSketch().deleteSelected();
         app.status = "Deleted selected elements";
+        recordActiveSketchEdit();
       }
     }
 
@@ -389,6 +402,7 @@ int main() {
           app.activeSketch().toggleConstruction(idx);
         }
         app.status = "Toggled construction";
+        recordActiveSketchEdit();
       }
     }
 
@@ -423,6 +437,7 @@ int main() {
         } else if (diag.duplicateConstraintCount > 0) {
           app.status += " (warning: duplicate constraints)";
         }
+        recordActiveSketchEdit();
       }
       }
     }
@@ -815,20 +830,25 @@ int main() {
           for (size_t idx : app.activeSketch().selectedIndices()) {
             app.activeSketch().toggleConstruction(idx);
           }
+          recordActiveSketchEdit();
         }
         if (ImGui::MenuItem("Delete", "Del", false, hasSel)) {
           app.activeSketch().deleteSelected();
           app.status = "Deleted selected elements";
+          recordActiveSketchEdit();
         }
         ImGui::Separator();
         if (ImGui::MenuItem("Horizontal", nullptr, false, hasSel)) {
           app.activeSketch().applyConstraintToSelection(ConstraintTool::Horizontal, 0.0f);
+          recordActiveSketchEdit();
         }
         if (ImGui::MenuItem("Vertical", nullptr, false, hasSel)) {
           app.activeSketch().applyConstraintToSelection(ConstraintTool::Vertical, 0.0f);
+          recordActiveSketchEdit();
         }
         if (ImGui::MenuItem("Fixed", nullptr, false, hasSel)) {
           app.activeSketch().applyConstraintToSelection(ConstraintTool::Fixed, 0.0f);
+          recordActiveSketchEdit();
         }
         ImGui::EndPopup();
       }
@@ -837,7 +857,8 @@ int main() {
     // Consume completed sketch primitives.
     if (app.hasActiveSketch()) {
       if (auto prim = app.sketchTool.takeResult()) {
-      app.activeSketch().addCompletedPrimitive(std::move(*prim));
+        app.activeSketch().addCompletedPrimitive(std::move(*prim));
+        recordActiveSketchEdit();
       }
     }
 
