@@ -31,7 +31,8 @@ class PrintSettings;
 enum class BooleanOp { Add, Subtract };
 enum class ExtrudeOp { Add, Subtract, CreateNewObject };
 enum class ObjectPickMode { None, ExtrudeTargets, CombineTargets, CombineTools, ChamferEdges };
-enum class BrowserSection { Objects, Sketches };
+enum class BrowserSection { Objects, Planes, Sketches };
+enum class PlaneReferenceSource { Plane, Face };
 
 struct ChamferEdgeSelection {
   int objectIndex = -1;
@@ -73,10 +74,18 @@ struct SolidExtrudeOptionsState {
 struct SketchCreateState {
   bool open = false;
   bool pickFromScene = false;
-  SketchPlane plane = SketchPlane::XY;
-  float offsetMm = 0.0f;
-  bool fromFace = false;
+  int selectedPlaneId = -1;
+};
+
+struct PlaneCreateState {
+  bool open = false;
+  bool pickFromScene = false;
+  PlaneReferenceSource source = PlaneReferenceSource::Plane;
+  int sourcePlaneId = -1;
   int sourceObject = -1;
+  SketchPlane sourceFacePlane = SketchPlane::XY;
+  int sourceFaceSign = 1;
+  char distanceBuffer[64] = {};
 };
 
 // Main application state
@@ -98,10 +107,13 @@ struct AppState {
   int selectedObject = -1;  // index into sceneObjects, -1 = none
   int nextObjectNumber = 1;
   std::vector<int> browserSelectedObjects;
+  std::vector<int> browserSelectedPlanes;
   std::vector<int> browserSelectedSketches;
   int objectSelectionAnchor = -1;
+  int planeSelectionAnchor = -1;
   int sketchSelectionAnchor = -1;
   int renameObjectIndex = -1;
+  int renamePlaneIndex = -1;
   int renameSketchIndex = -1;
   std::array<char, 64> renameBuffer{};
   bool focusRenameInput = false;
@@ -116,11 +128,15 @@ struct AppState {
 
   // Scene / sketch state.
   SceneMode sceneMode = SceneMode::View3D;
+  std::vector<PlaneEntry> planes;
   std::vector<SketchEntry> sketches;
   int activeSketchIndex = -1;
+  int nextPlaneId = 1;
+  int nextPlaneNumber = 1;
   int nextSketchNumber = 1;
   SketchCreateState sketchCreate;
-  std::optional<SketchPlane> hoveredPlaneIndicator;  // for gizmo hover feedback
+  PlaneCreateState planeCreate;
+  std::optional<int> hoveredPlaneId;
   int partialSelectedObject = -1;
   int projectSourceSketchIndex = -1;
   bool showProjectTool = false;
@@ -155,6 +171,8 @@ struct AppState {
   std::string status = "Ready";
   bool dragging = false;
   bool wasLeftDown = false;  // for click-edge detection
+  bool gizmoScaleInitialized = false;
+  float gizmoScaleSmoothed = 1.0f;
 
   // Rubber-band drag selection state.
   bool dragSelecting = false;

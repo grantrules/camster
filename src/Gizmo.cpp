@@ -26,22 +26,26 @@ constexpr glm::vec4 kBlueBright{0.3f, 0.3f, 1.0f, 1.0f};
 
 // Helper: emit a shaft + 4-line arrowhead along `axis` in `color`.
 void appendArrow(std::vector<ColorVertex>& lines, glm::vec3 axis,
-                 glm::vec3 perp1, glm::vec3 perp2, const glm::vec4& color) {
-  const glm::vec3 tip = axis * kLen;
-  const glm::vec3 base = axis * (kLen - kHeadLen);
+                 glm::vec3 perp1, glm::vec3 perp2, const glm::vec4& color,
+                 float scale) {
+  const float len = kLen * scale;
+  const float headLen = kHeadLen * scale;
+  const float headWidth = kHeadWidth * scale;
+  const glm::vec3 tip = axis * len;
+  const glm::vec3 base = axis * (len - headLen);
 
   // Shaft: origin → tip.
   lines.push_back({{0.0f, 0.0f, 0.0f}, color});
   lines.push_back({tip, color});
 
   // Arrowhead: four lines converging on the tip.
-  lines.push_back({base + perp1 * kHeadWidth, color});
+  lines.push_back({base + perp1 * headWidth, color});
   lines.push_back({tip, color});
-  lines.push_back({base - perp1 * kHeadWidth, color});
+  lines.push_back({base - perp1 * headWidth, color});
   lines.push_back({tip, color});
-  lines.push_back({base + perp2 * kHeadWidth, color});
+  lines.push_back({base + perp2 * headWidth, color});
   lines.push_back({tip, color});
-  lines.push_back({base - perp2 * kHeadWidth, color});
+  lines.push_back({base - perp2 * headWidth, color});
   lines.push_back({tip, color});
 }
 
@@ -110,24 +114,27 @@ float rayHitsSquare(glm::vec3 rayOrigin, glm::vec3 rayDir, SketchPlane plane,
 }
 }  // namespace
 
+void Gizmo::setScale(float scale) {
+  scale_ = std::max(0.001f, scale);
+}
+
+float Gizmo::planeSize() const {
+  return kPlaneSize * scale_ * 0.5f;
+}
+
 void Gizmo::appendLines(std::vector<ColorVertex>& lines) const {
   // X axis (red).
-  appendArrow(lines, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}, kRed);
+  appendArrow(lines, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}, kRed, scale_);
   // Y axis (green).
-  appendArrow(lines, {0, 1, 0}, {1, 0, 0}, {0, 0, 1}, kGreen);
+  appendArrow(lines, {0, 1, 0}, {1, 0, 0}, {0, 0, 1}, kGreen, scale_);
   // Z axis (blue).
-  appendArrow(lines, {0, 0, 1}, {1, 0, 0}, {0, 1, 0}, kBlue);
-
-  // Plane indicators: small squares positioned at origin, one per plane.
-  appendPlaneSquare(lines, SketchPlane::XY, kRedDim, kPlaneSize);
-  appendPlaneSquare(lines, SketchPlane::XZ, kGreenDim, kPlaneSize);
-  appendPlaneSquare(lines, SketchPlane::YZ, kBlueDim, kPlaneSize);
+  appendArrow(lines, {0, 0, 1}, {1, 0, 0}, {0, 1, 0}, kBlue, scale_);
 }
 
 void Gizmo::appendHighlightedPlane(std::vector<ColorVertex>& lines,
                                    SketchPlane plane) const {
   // Render the highlighted plane with a brighter color and slightly larger.
-  const float highlightedSize = kPlaneSize * 1.2f;
+  const float highlightedSize = planeSize() * 1.2f;
   const glm::vec4 brightColor = (plane == SketchPlane::XY)   ? kRedBright
                                 : (plane == SketchPlane::XZ) ? kGreenBright
                                                              : kBlueBright;
@@ -144,7 +151,7 @@ std::optional<SketchPlane> Gizmo::rayHitsPlaneIndicator(glm::vec3 rayOrigin,
   std::optional<SketchPlane> bestPlane;
 
   for (SketchPlane plane : {SketchPlane::XY, SketchPlane::XZ, SketchPlane::YZ}) {
-    float t = rayHitsSquare(rayOrigin, rayDir, plane, kPlaneSize);
+    float t = rayHitsSquare(rayOrigin, rayDir, plane, planeSize());
     if (t >= 0.0f && t < bestDist) {
       bestDist = t;
       bestPlane = plane;

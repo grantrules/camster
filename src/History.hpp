@@ -12,16 +12,22 @@
 
 #include <glm/vec2.hpp>
 
+#include "ProjectTypes.hpp"
 #include "Scene.hpp"
 #include "sketch/Constraint.hpp"
 #include "sketch/Primitive.hpp"
 
 // ---- Action payloads ------------------------------------------------
 
+struct CreatePlaneAction {
+  int planeId = -1;
+  PlaneReference reference;
+  std::string name;
+};
+
 // A new sketch was created.
 struct CreateSketchAction {
-  SketchPlane plane = SketchPlane::XY;
-  float offsetMm = 0.0f;
+  int planeId = -1;
   std::string name;
 };
 
@@ -60,6 +66,7 @@ struct CombineAction {
 };
 
 using HistoryAction = std::variant<
+  CreatePlaneAction,
     CreateSketchAction,
     EditSketchAction,
     ExtrudeAction,
