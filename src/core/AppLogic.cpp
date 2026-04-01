@@ -1170,6 +1170,99 @@ bool applyChamferEdges(AppState* app, int objectIndex,
   return true;
 }
 
+bool applyFilletEdges(AppState* app, int objectIndex,
+                      const std::vector<ChamferEdgeSelection>& edges,
+                      float radiusMm) {
+  if (objectIndex < 0 || objectIndex >= static_cast<int>(app->sceneObjects.size())) return false;
+  if (radiusMm <= 0.0f || edges.empty()) return false;
+  if (objectIndex >= static_cast<int>(app->sceneObjectMeta.size()) ||
+      app->sceneObjectMeta[objectIndex].locked) {
+    return false;
+  }
+
+  const StlMesh& srcMesh = app->sceneObjects[objectIndex];
+  auto verts = srcMesh.vertices();
+  const auto& inds = srcMesh.indices();
+  if (verts.empty() || inds.empty()) return false;
+
+  pushObjectUndoSnapshot(app);
+
+  auto nearestPointOnSegment = [](glm::vec3 p, glm::vec3 a, glm::vec3 b) {
+    const glm::vec3 ab = b - a;
+    const float len2 = glm::dot(ab, ab);
+    if (len2 <= 1e-12f) return a;
+    const float t = glm::clamp(glm::dot(p - a, ab) / len2, 0.0f, 1.0f);
+    return a + ab * t;
+  };
+
+  std::vector<std::vector<uint32_t>> adjacency(verts.size());
+  for (size_t i = 0; i + 2 < inds.size(); i += 3) {
+    const uint32_t ia = inds[i + 0];
+    const uint32_t ib = inds[i + 1];
+    const uint32_t ic = inds[i + 2];
+    adjacency[ia].push_back(ib);
+    adjacency[ia].push_back(ic);
+    adjacency[ib].push_back(ia);
+    adjacency[ib].push_back(ic);
+    adjacency[ic].push_back(ia);
+    adjacency[ic].push_back(ib);
+  }
+  for (auto& neighbors : adjacency) {
+    std::sort(neighbors.begin(), neighbors.end());
+    neighbors.erase(std::unique(neighbors.begin(), neighbors.end()), neighbors.end());
+  }
+
+  std::vector<glm::vec3> nextPos(verts.size());
+  for (size_t i = 0; i < verts.size(); ++i) nextPos[i] = verts[i].position;
+
+  bool changed = false;
+  const float influenceRadius = radiusMm * 1.75f;
+  for (const auto& edge : edges) {
+    if (edge.objectIndex != objectIndex) continue;
+    for (size_t i = 0; i < verts.size(); ++i) {
+      if (adjacency[i].empty()) continue;
+      const glm::vec3 onEdge = nearestPointOnSegment(verts[i].position, edge.a, edge.b);
+      const float dist = glm::length(verts[i].position - onEdge);
+      if (dist > influenceRadius) continue;
+
+      glm::vec3 neighborAverage(0.0f);
+      for (uint32_t neighbor : adjacency[i]) {
+        neighborAverage += verts[neighbor].position;
+      }
+      neighborAverage /= static_cast<float>(adjacency[i].size());
+
+      const float blend = glm::clamp(1.0f - dist / influenceRadius, 0.0f, 1.0f) * 0.65f;
+      nextPos[i] = glm::mix(nextPos[i], neighborAverage, blend);
+      changed = true;
+    }
+  }
+
+  if (!changed) return false;
+
+  for (size_t i = 0; i < verts.size(); ++i) {
+    verts[i].position = nextPos[i];
+  }
+
+  for (size_t i = 0; i + 2 < inds.size(); i += 3) {
+    StlVertex& va = verts[inds[i + 0]];
+    StlVertex& vb = verts[inds[i + 1]];
+    StlVertex& vc = verts[inds[i + 2]];
+    glm::vec3 n = glm::normalize(glm::cross(vb.position - va.position, vc.position - va.position));
+    if (glm::dot(n, n) < 1e-8f) {
+      n = {0.0f, 0.0f, 1.0f};
+    }
+    va.normal = n;
+    vb.normal = n;
+    vc.normal = n;
+  }
+
+  app->sceneObjects[objectIndex] = StlMesh::fromGeometry(std::move(verts), inds);
+  app->selectedObject = objectIndex;
+  app->browserSelectedObjects.assign(1, objectIndex);
+  rebuildCombinedMesh(app);
+  return true;
+}
+
 bool applyDraftObject(AppState* app, int objectIndex, float angleDegrees) {
   if (!app) return false;
   if (objectIndex < 0 || objectIndex >= static_cast<int>(app->sceneObjects.size())) return false;

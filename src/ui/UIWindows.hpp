@@ -16,4 +16,5 @@ void drawSolidExtrudeWindow(AppState* app);
 void drawExtrudeOptionsWindow(AppState* app);
 void drawCombineWindow(AppState* app);
 void drawChamferWindow(AppState* app);
+void drawFilletWindow(AppState* app);
 void drawDraftWindow(AppState* app);

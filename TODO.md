@@ -16,7 +16,7 @@
 ## M3: Solid Modeling v1
 - [ ] Feature set: extrude, revolve, sweep, loft, shell, draft
 - [x] Booleans: union/subtract/intersect
-- [ ] Fillet/chamfer baseline with reference persistence strategy
+- [x] Fillet/chamfer baseline with reference persistence strategy
 - [ ] Robust reference geometry (planes/axes/points)
 
 ## M4: CAM MVP

@@ -501,6 +501,20 @@ void drawSolidToolbar(AppState* app) {
 
   ImGui::SameLine();
   if (!hasSelectedObject) ImGui::BeginDisabled();
+  if (ImGui::Button("Fillet")) {
+    app->filletOptions.visible = true;
+    app->filletOptions.targetObject = app->selectedObject;
+    app->filletOptions.edges.clear();
+    std::snprintf(app->filletOptions.radiusBuffer,
+                  sizeof(app->filletOptions.radiusBuffer), "1.000");
+    app->objectPickMode = ObjectPickMode::FilletEdges;
+    app->filletOptions.pickEdges = true;
+    app->status = "Fillet: click edges on the selected object";
+  }
+  if (!hasSelectedObject) ImGui::EndDisabled();
+
+  ImGui::SameLine();
+  if (!hasSelectedObject) ImGui::BeginDisabled();
   if (ImGui::Button("Draft")) {
     app->draftOptions.visible = true;
     app->draftOptions.targetObject = app->selectedObject;
@@ -1913,6 +1927,91 @@ void drawChamferWindow(AppState* app) {
   if (!app->chamferOptions.visible && app->objectPickMode == ObjectPickMode::ChamferEdges) {
     app->objectPickMode = ObjectPickMode::None;
     app->chamferOptions.pickEdges = false;
+  }
+}
+
+void drawFilletWindow(AppState* app) {
+  if (!app->filletOptions.visible) return;
+
+  ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                          ImVec2(0.5f, 0.5f));
+  ImGui::SetNextWindowSize(ImVec2(520.0f, 0.0f), ImGuiCond_FirstUseEver);
+  bool open = app->filletOptions.visible;
+  if (ImGui::Begin("Fillet Tool", &open)) {
+    const int obj = app->filletOptions.targetObject;
+    if (obj < 0 || obj >= static_cast<int>(app->sceneObjects.size())) {
+      ImGui::TextDisabled("No valid target object selected.");
+    } else {
+      ImGui::Text("Target: %s", app->sceneObjectMeta[obj].name.data());
+      ImGui::Text("Selected edges: %d", static_cast<int>(app->filletOptions.edges.size()));
+    }
+
+    ImGui::Text("Fillet Radius:");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(140.0f);
+    ImGui::InputText("##filletRadius", app->filletOptions.radiusBuffer,
+                     sizeof(app->filletOptions.radiusBuffer));
+    ImGui::SameLine();
+    ImGui::TextDisabled("(%s)", unitSuffix(app->project.defaultUnit));
+
+    if (ImGui::Button(app->filletOptions.pickEdges ? "Stop Edge Pick" : "Pick Edges")) {
+      app->filletOptions.pickEdges = !app->filletOptions.pickEdges;
+      app->objectPickMode = app->filletOptions.pickEdges ? ObjectPickMode::FilletEdges
+                                                         : ObjectPickMode::None;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Clear Edges")) {
+      app->filletOptions.edges.clear();
+    }
+
+    ImGui::Separator();
+    ImGui::BeginChild("##filletEdges", ImVec2(0.0f, 140.0f), true);
+    int eraseIdx = -1;
+    for (int i = 0; i < static_cast<int>(app->filletOptions.edges.size()); ++i) {
+      const auto& e = app->filletOptions.edges[i];
+      ImGui::PushID(i);
+      if (ImGui::SmallButton("x")) eraseIdx = i;
+      ImGui::SameLine();
+      ImGui::Text("Edge %d  (%.2f, %.2f, %.2f) -> (%.2f, %.2f, %.2f)", i + 1,
+                  e.a.x, e.a.y, e.a.z, e.b.x, e.b.y, e.b.z);
+      ImGui::PopID();
+    }
+    if (eraseIdx >= 0) {
+      app->filletOptions.edges.erase(app->filletOptions.edges.begin() + eraseIdx);
+    }
+    ImGui::EndChild();
+
+    ImGui::Separator();
+    if (ImGui::Button("Apply Fillet")) {
+      auto parsed = parseDimension(std::string(app->filletOptions.radiusBuffer),
+                                   app->project.defaultUnit);
+      if (!parsed) {
+        app->status = "Fillet: enter a valid radius";
+      } else if (!applyFilletEdges(app, app->filletOptions.targetObject,
+                                   app->filletOptions.edges, parsed->valueMm)) {
+        app->status = "Fillet failed (select edges on an unlocked object)";
+      } else {
+        app->status = "Fillet applied";
+        app->filletOptions.visible = false;
+        app->filletOptions.pickEdges = false;
+        app->objectPickMode = ObjectPickMode::None;
+      }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Close")) {
+      app->filletOptions.visible = false;
+      app->filletOptions.pickEdges = false;
+      if (app->objectPickMode == ObjectPickMode::FilletEdges) {
+        app->objectPickMode = ObjectPickMode::None;
+      }
+    }
+  }
+  ImGui::End();
+
+  app->filletOptions.visible = open;
+  if (!app->filletOptions.visible && app->objectPickMode == ObjectPickMode::FilletEdges) {
+    app->objectPickMode = ObjectPickMode::None;
+    app->filletOptions.pickEdges = false;
   }
 }
 

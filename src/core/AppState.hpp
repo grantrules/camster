@@ -30,7 +30,14 @@ class PrintSettings;
 
 enum class BooleanOp { Add, Subtract, Intersect };
 enum class ExtrudeOp { Add, Subtract, CreateNewObject };
-enum class ObjectPickMode { None, ExtrudeTargets, CombineTargets, CombineTools, ChamferEdges };
+enum class ObjectPickMode {
+  None,
+  ExtrudeTargets,
+  CombineTargets,
+  CombineTools,
+  ChamferEdges,
+  FilletEdges,
+};
 enum class BrowserSection { Objects, Planes, Sketches };
 enum class PlaneReferenceSource { Plane, Face };
 
@@ -62,6 +69,14 @@ struct ChamferOptionsState {
   int targetObject = -1;
   std::vector<ChamferEdgeSelection> edges;
   char distanceBuffer[64] = {};
+};
+
+struct FilletOptionsState {
+  bool visible = false;
+  bool pickEdges = false;
+  int targetObject = -1;
+  std::vector<ChamferEdgeSelection> edges;
+  char radiusBuffer[64] = {};
 };
 
 struct DraftOptionsState {
@@ -138,6 +153,7 @@ struct AppState {
   ExtrudeOptionsState extrudeOptions;
   CombineOptionsState combineOptions;
   ChamferOptionsState chamferOptions;
+  FilletOptionsState filletOptions;
   DraftOptionsState draftOptions;
   SolidExtrudeOptionsState solidExtrudeOptions;
 

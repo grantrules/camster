@@ -631,10 +631,16 @@ int main() {
                         view, proj, rayO, rayD);
 
             const int hit = pickObject(app, rayO, rayD);
-            if (app.objectPickMode == ObjectPickMode::ChamferEdges) {
-              const int obj = app.chamferOptions.targetObject >= 0
-                                  ? app.chamferOptions.targetObject
-                                  : app.selectedObject;
+            if (app.objectPickMode == ObjectPickMode::ChamferEdges ||
+                app.objectPickMode == ObjectPickMode::FilletEdges) {
+              const bool filletMode = app.objectPickMode == ObjectPickMode::FilletEdges;
+              const int obj = filletMode
+                                  ? (app.filletOptions.targetObject >= 0
+                                         ? app.filletOptions.targetObject
+                                         : app.selectedObject)
+                                  : (app.chamferOptions.targetObject >= 0
+                                         ? app.chamferOptions.targetObject
+                                         : app.selectedObject);
               const EdgePickResult edgePick = pickChamferEdge(app, obj, rayO, rayD);
               if (edgePick.hit) {
                 auto sameEdge = [](const ChamferEdgeSelection& lhs,
@@ -648,19 +654,19 @@ int main() {
                           (near(lhs.a, rhs.b) && near(lhs.b, rhs.a)));
                 };
 
+                auto& selectedEdges = filletMode ? app.filletOptions.edges : app.chamferOptions.edges;
                 bool removed = false;
-                for (auto it = app.chamferOptions.edges.begin();
-                     it != app.chamferOptions.edges.end(); ++it) {
+                for (auto it = selectedEdges.begin(); it != selectedEdges.end(); ++it) {
                   if (sameEdge(*it, edgePick.edge)) {
-                    app.chamferOptions.edges.erase(it);
+                    selectedEdges.erase(it);
                     removed = true;
-                    app.status = "Chamfer edge removed";
+                    app.status = filletMode ? "Fillet edge removed" : "Chamfer edge removed";
                     break;
                   }
                 }
                 if (!removed) {
-                  app.chamferOptions.edges.push_back(edgePick.edge);
-                  app.status = "Chamfer edge selected";
+                  selectedEdges.push_back(edgePick.edge);
+                  app.status = filletMode ? "Fillet edge selected" : "Chamfer edge selected";
                 }
               }
             } else if (hit >= 0) {
@@ -1021,6 +1027,7 @@ int main() {
     drawExtrudeOptionsWindow(&app);
     drawCombineWindow(&app);
     drawChamferWindow(&app);
+    drawFilletWindow(&app);
     drawDraftWindow(&app);
 
     // --- File browser (modal — drawn every frame while visible) ---
