@@ -63,3 +63,21 @@ struct SketchEntry {
   SketchPlane plane = SketchPlane::XY;
   float offsetMm = 0.0f;
 };
+
+struct ReferenceGeometryMetadata {
+  std::array<char, 64> name{};
+  bool visible = true;
+  bool locked = false;
+};
+
+struct ReferencePointEntry {
+  ReferenceGeometryMetadata meta;
+  glm::vec3 position{0.0f};
+};
+
+struct ReferenceAxisEntry {
+  ReferenceGeometryMetadata meta;
+  glm::vec3 origin{0.0f};
+  glm::vec3 direction{0.0f, 0.0f, 1.0f};
+  float displayLengthMm = 100.0f;
+};

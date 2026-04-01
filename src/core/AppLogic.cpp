@@ -66,6 +66,10 @@ Aabb meshAabb(const StlMesh& mesh) {
   return box;
 }
 
+glm::vec3 aabbCenter(const Aabb& box) {
+  return (box.min + box.max) * 0.5f;
+}
+
 bool aabbOverlap(const Aabb& a, const Aabb& b) {
   if (!a.valid || !b.valid) return false;
   return a.min.x <= b.max.x && a.max.x >= b.min.x &&
@@ -540,6 +544,75 @@ void createOffsetPlaneFromFace(AppState* app, int sourceObjectIndex,
   app->planeSelectionAnchor = static_cast<int>(app->planes.size()) - 1;
 }
 
+void createReferencePointFromSelection(AppState* app) {
+  if (!app) return;
+  ReferencePointEntry entry;
+  setName(entry.meta.name, "Point " + std::to_string(app->nextPointNumber++));
+  entry.meta.visible = true;
+  entry.meta.locked = false;
+
+  if (app->selectedObject >= 0 && app->selectedObject < static_cast<int>(app->sceneObjects.size())) {
+    const Aabb box = meshAabb(app->sceneObjects[app->selectedObject]);
+    if (box.valid) entry.position = aabbCenter(box);
+  } else if (!app->browserSelectedPlanes.empty()) {
+    const int planeIndex = app->browserSelectedPlanes.front();
+    if (planeIndex >= 0 && planeIndex < static_cast<int>(app->planes.size())) {
+      const ResolvedPlane resolved = resolvePlane(app, app->planes[planeIndex].id);
+      if (resolved.valid) entry.position = toWorld(glm::vec2(0.0f), resolved.plane, resolved.offsetMm);
+    }
+  }
+
+  ReferenceGeometryAction action;
+  action.geometryType = "Point";
+  action.name = entry.meta.name.data();
+  app->timeline.push(std::move(action), "Create " + std::string(entry.meta.name.data()));
+  app->timelineCursor = app->timeline.size() - 1;
+
+  app->referencePoints.push_back(entry);
+  app->browserSelectedPoints.assign(1, static_cast<int>(app->referencePoints.size()) - 1);
+  app->pointSelectionAnchor = static_cast<int>(app->referencePoints.size()) - 1;
+}
+
+void createReferenceAxisFromSelection(AppState* app) {
+  if (!app) return;
+  ReferenceAxisEntry entry;
+  setName(entry.meta.name, "Axis " + std::to_string(app->nextAxisNumber++));
+  entry.meta.visible = true;
+  entry.meta.locked = false;
+  entry.displayLengthMm = 120.0f;
+
+  if (!app->browserSelectedPlanes.empty()) {
+    const int planeIndex = app->browserSelectedPlanes.front();
+    if (planeIndex >= 0 && planeIndex < static_cast<int>(app->planes.size())) {
+      const ResolvedPlane resolved = resolvePlane(app, app->planes[planeIndex].id);
+      if (resolved.valid) {
+        entry.origin = toWorld(glm::vec2(0.0f), resolved.plane, resolved.offsetMm);
+        entry.direction = planeNormal(resolved.plane);
+      }
+    }
+  } else if (app->selectedObject >= 0 && app->selectedObject < static_cast<int>(app->sceneObjects.size())) {
+    const Aabb box = meshAabb(app->sceneObjects[app->selectedObject]);
+    if (box.valid) {
+      entry.origin = aabbCenter(box);
+      const glm::vec3 span = box.max - box.min;
+      if (span.x >= span.y && span.x >= span.z) entry.direction = {1.0f, 0.0f, 0.0f};
+      else if (span.y >= span.x && span.y >= span.z) entry.direction = {0.0f, 1.0f, 0.0f};
+      else entry.direction = {0.0f, 0.0f, 1.0f};
+      entry.displayLengthMm = std::max({span.x, span.y, span.z, 40.0f}) * 1.25f;
+    }
+  }
+
+  ReferenceGeometryAction action;
+  action.geometryType = "Axis";
+  action.name = entry.meta.name.data();
+  app->timeline.push(std::move(action), "Create " + std::string(entry.meta.name.data()));
+  app->timelineCursor = app->timeline.size() - 1;
+
+  app->referenceAxes.push_back(entry);
+  app->browserSelectedAxes.assign(1, static_cast<int>(app->referenceAxes.size()) - 1);
+  app->axisSelectionAnchor = static_cast<int>(app->referenceAxes.size()) - 1;
+}
+
 void appendSceneObject(AppState* app, StlMesh mesh) {
   app->sceneObjects.push_back(std::move(mesh));
   ObjectMetadata meta;
@@ -690,6 +763,14 @@ void clearSceneObjects(AppState* app) {
   app->nextObjectNumber = 1;
   app->renameObjectIndex = -1;
   app->renameSketchIndex = -1;
+  app->referenceAxes.clear();
+  app->referencePoints.clear();
+  app->browserSelectedAxes.clear();
+  app->browserSelectedPoints.clear();
+  app->axisSelectionAnchor = -1;
+  app->pointSelectionAnchor = -1;
+  app->nextAxisNumber = 1;
+  app->nextPointNumber = 1;
 }
 
 void beginObjectRename(AppState* app, int idx) {

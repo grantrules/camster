@@ -407,6 +407,15 @@ void drawMenuBar(AppState* app) {
                     sizeof(app->draftOptions.angleBuffer), "2.000");
       app->status = "Draft tool opened";
     }
+    const bool canReference = app->sceneMode == SceneMode::View3D;
+    if (ImGui::MenuItem("Create Reference Point", nullptr, false, canReference)) {
+      createReferencePointFromSelection(app);
+      app->status = "Reference point created";
+    }
+    if (ImGui::MenuItem("Create Reference Axis", nullptr, false, canReference)) {
+      createReferenceAxisFromSelection(app);
+      app->status = "Reference axis created";
+    }
     ImGui::EndMenu();
   }
 
@@ -452,6 +461,18 @@ void drawSolidToolbar(AppState* app) {
   }
 
   ImGui::SameLine();
+  if (ImGui::Button("Axis")) {
+    createReferenceAxisFromSelection(app);
+    app->status = "Reference axis created";
+  }
+
+  ImGui::SameLine();
+  if (ImGui::Button("Point")) {
+    createReferencePointFromSelection(app);
+    app->status = "Reference point created";
+  }
+
+  ImGui::SameLine();
   const bool hasSketch = !app->sketches.empty();
   if (!hasSketch) ImGui::BeginDisabled();
   if (ImGui::Button("Extrude")) {
@@ -466,6 +487,45 @@ void drawSolidToolbar(AppState* app) {
     app->status = "3D Extrude: pick closed profiles; uncheck inner loops to create holes";
   }
   if (!hasSketch) ImGui::EndDisabled();
+
+  ImGui::SameLine();
+  if (!hasSketch) ImGui::BeginDisabled();
+  if (ImGui::Button("Revolve")) {
+    app->revolveOptions.visible = true;
+    app->revolveOptions.sourceSketch = app->browserSelectedSketches.empty()
+                                           ? (static_cast<int>(app->sketches.size()) - 1)
+                                           : app->browserSelectedSketches.front();
+    app->revolveOptions.axisMode = 0;
+    std::snprintf(app->revolveOptions.angleBuffer,
+                  sizeof(app->revolveOptions.angleBuffer), "360.000");
+    app->status = "Revolve tool opened";
+  }
+  if (!hasSketch) ImGui::EndDisabled();
+
+  ImGui::SameLine();
+  if (!hasSketch) ImGui::BeginDisabled();
+  if (ImGui::Button("Sweep")) {
+    app->sweepOptions.visible = true;
+    app->sweepOptions.sourceSketch = app->browserSelectedSketches.empty()
+                                         ? (static_cast<int>(app->sketches.size()) - 1)
+                                         : app->browserSelectedSketches.front();
+    app->sweepOptions.axisMode = 2;
+    std::snprintf(app->sweepOptions.distanceBuffer,
+                  sizeof(app->sweepOptions.distanceBuffer), "10.000");
+    app->status = "Sweep tool opened";
+  }
+  if (!hasSketch) ImGui::EndDisabled();
+
+  ImGui::SameLine();
+  if (app->sketches.size() < 2) ImGui::BeginDisabled();
+  if (ImGui::Button("Loft")) {
+    app->loftOptions.visible = true;
+    app->loftOptions.sourceSketchA = app->browserSelectedSketches.empty() ? 0 : app->browserSelectedSketches.front();
+    app->loftOptions.sourceSketchB = std::min(app->loftOptions.sourceSketchA + 1,
+                                              static_cast<int>(app->sketches.size()) - 1);
+    app->status = "Loft tool opened";
+  }
+  if (app->sketches.size() < 2) ImGui::EndDisabled();
 
   ImGui::SameLine();
   const bool canCombine = app->sceneObjects.size() >= 2;
@@ -521,6 +581,17 @@ void drawSolidToolbar(AppState* app) {
     std::snprintf(app->draftOptions.angleBuffer,
                   sizeof(app->draftOptions.angleBuffer), "2.000");
     app->status = "Draft: positive tapers inward along +Z";
+  }
+  if (!hasSelectedObject) ImGui::EndDisabled();
+
+  ImGui::SameLine();
+  if (!hasSelectedObject) ImGui::BeginDisabled();
+  if (ImGui::Button("Shell")) {
+    app->shellOptions.visible = true;
+    app->shellOptions.targetObject = app->selectedObject;
+    std::snprintf(app->shellOptions.thicknessBuffer,
+                  sizeof(app->shellOptions.thicknessBuffer), "1.000");
+    app->status = "Shell tool opened";
   }
   if (!hasSelectedObject) ImGui::EndDisabled();
 
@@ -1286,6 +1357,62 @@ void drawObjectBrowserWindow(AppState* app) {
     }
   }
 
+  if (ImGui::CollapsingHeader("Axes", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ImGui::BeginTable("##axesTable", 2,
+                          ImGuiTableFlags_RowBg |
+                              ImGuiTableFlags_BordersInnerV |
+                              ImGuiTableFlags_SizingStretchProp)) {
+      ImGui::TableSetupColumn("V", ImGuiTableColumnFlags_WidthFixed, 28.0f);
+      ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableHeadersRow();
+      for (int i = 0; i < static_cast<int>(app->referenceAxes.size()); ++i) {
+        auto& axis = app->referenceAxes[i];
+        const bool selected = hasIndex(app->browserSelectedAxes, i);
+        ImGui::TableNextRow();
+        ImGui::PushID(3000 + i);
+        ImGui::TableSetColumnIndex(0);
+        visibilityIconToggle("##axvis", &axis.meta.visible);
+        ImGui::TableSetColumnIndex(1);
+        if (ImGui::Selectable(axis.meta.name.data(), selected, ImGuiSelectableFlags_SpanAllColumns)) {
+          setSingleOrMultiSelection(app->browserSelectedAxes, i, multiSelect);
+          app->axisSelectionAnchor = i;
+          app->browserFocusSection = BrowserSection::Axes;
+        }
+        ImGui::PopID();
+      }
+      ImGui::EndTable();
+    }
+    if (app->referenceAxes.empty()) ImGui::TextDisabled("(no axes)");
+  }
+
+  if (ImGui::CollapsingHeader("Points", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ImGui::BeginTable("##pointsTable", 2,
+                          ImGuiTableFlags_RowBg |
+                              ImGuiTableFlags_BordersInnerV |
+                              ImGuiTableFlags_SizingStretchProp)) {
+      ImGui::TableSetupColumn("V", ImGuiTableColumnFlags_WidthFixed, 28.0f);
+      ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableHeadersRow();
+      for (int i = 0; i < static_cast<int>(app->referencePoints.size()); ++i) {
+        auto& point = app->referencePoints[i];
+        const bool selected = hasIndex(app->browserSelectedPoints, i);
+        ImGui::TableNextRow();
+        ImGui::PushID(4000 + i);
+        ImGui::TableSetColumnIndex(0);
+        visibilityIconToggle("##ptvis", &point.meta.visible);
+        ImGui::TableSetColumnIndex(1);
+        if (ImGui::Selectable(point.meta.name.data(), selected, ImGuiSelectableFlags_SpanAllColumns)) {
+          setSingleOrMultiSelection(app->browserSelectedPoints, i, multiSelect);
+          app->pointSelectionAnchor = i;
+          app->browserFocusSection = BrowserSection::Points;
+        }
+        ImGui::PopID();
+      }
+      ImGui::EndTable();
+    }
+    if (app->referencePoints.empty()) ImGui::TextDisabled("(no points)");
+  }
+
   if (browserFocused && !ImGui::IsAnyItemActive()) {
     if (ImGui::IsKeyPressed(ImGuiKey_F2)) {
       if (app->browserFocusSection == BrowserSection::Objects &&
@@ -1750,6 +1877,165 @@ void drawExtrudeOptionsWindow(AppState* app) {
   if (!app->extrudeOptions.visible && app->objectPickMode == ObjectPickMode::ExtrudeTargets) {
     app->objectPickMode = ObjectPickMode::None;
   }
+}
+
+void drawRevolveWindow(AppState* app) {
+  if (!app->revolveOptions.visible) return;
+  ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                          ImVec2(0.5f, 0.5f));
+  ImGui::SetNextWindowSize(ImVec2(420.0f, 0.0f), ImGuiCond_FirstUseEver);
+  bool open = app->revolveOptions.visible;
+  if (ImGui::Begin("Revolve Tool", &open)) {
+    std::vector<const char*> names;
+    for (const auto& sk : app->sketches) names.push_back(sk.meta.name.data());
+    int idx = std::clamp(app->revolveOptions.sourceSketch, 0,
+                         std::max(0, static_cast<int>(app->sketches.size()) - 1));
+    ImGui::Combo("Source Sketch", &idx, names.data(), static_cast<int>(names.size()));
+    app->revolveOptions.sourceSketch = idx;
+    ImGui::Combo("Axis", &app->revolveOptions.axisMode, "Sketch X\0Sketch Y\0");
+    ImGui::InputText("Angle", app->revolveOptions.angleBuffer, sizeof(app->revolveOptions.angleBuffer));
+    if (ImGui::Button("Apply Revolve")) {
+      char* endPtr = nullptr;
+      const float angle = std::strtof(app->revolveOptions.angleBuffer, &endPtr);
+      const auto& sk = app->sketches[idx];
+      StlMesh mesh = revolveMesh(sk.sketch.closedProfiles(), sk.plane, sk.offsetMm,
+                                 app->revolveOptions.axisMode, angle);
+      if (endPtr == app->revolveOptions.angleBuffer || mesh.empty() || !applyAddExtrude(app, mesh, {})) {
+        app->status = "Revolve failed";
+      } else {
+        SolidFeatureAction action;
+        action.featureName = "Revolve";
+        action.sourceNames = {std::string(sk.meta.name.data())};
+        action.resultObjectName = objectName(app, static_cast<int>(app->sceneObjects.size()) - 1);
+        app->timeline.push(std::move(action), "Revolve");
+        app->timelineCursor = app->timeline.size() - 1;
+        app->status = "Revolve complete";
+        app->revolveOptions.visible = false;
+      }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Close")) app->revolveOptions.visible = false;
+  }
+  ImGui::End();
+  app->revolveOptions.visible = open;
+}
+
+void drawSweepWindow(AppState* app) {
+  if (!app->sweepOptions.visible) return;
+  ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                          ImVec2(0.5f, 0.5f));
+  ImGui::SetNextWindowSize(ImVec2(420.0f, 0.0f), ImGuiCond_FirstUseEver);
+  bool open = app->sweepOptions.visible;
+  if (ImGui::Begin("Sweep Tool", &open)) {
+    std::vector<const char*> names;
+    for (const auto& sk : app->sketches) names.push_back(sk.meta.name.data());
+    int idx = std::clamp(app->sweepOptions.sourceSketch, 0,
+                         std::max(0, static_cast<int>(app->sketches.size()) - 1));
+    ImGui::Combo("Source Sketch", &idx, names.data(), static_cast<int>(names.size()));
+    app->sweepOptions.sourceSketch = idx;
+    ImGui::Combo("Direction", &app->sweepOptions.axisMode, "World X\0World Y\0World Z\0");
+    ImGui::InputText("Distance", app->sweepOptions.distanceBuffer, sizeof(app->sweepOptions.distanceBuffer));
+    if (ImGui::Button("Apply Sweep")) {
+      auto parsed = parseDimension(std::string(app->sweepOptions.distanceBuffer), app->project.defaultUnit);
+      const auto& sk = app->sketches[idx];
+      StlMesh mesh = parsed ? sweepMesh(sk.sketch.closedProfiles(), sk.plane, sk.offsetMm,
+                                        app->sweepOptions.axisMode, parsed->valueMm) : StlMesh();
+      if (mesh.empty() || !applyAddExtrude(app, mesh, {})) {
+        app->status = "Sweep failed";
+      } else {
+        SolidFeatureAction action;
+        action.featureName = "Sweep";
+        action.sourceNames = {std::string(sk.meta.name.data())};
+        action.resultObjectName = objectName(app, static_cast<int>(app->sceneObjects.size()) - 1);
+        app->timeline.push(std::move(action), "Sweep");
+        app->timelineCursor = app->timeline.size() - 1;
+        app->status = "Sweep complete";
+        app->sweepOptions.visible = false;
+      }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Close")) app->sweepOptions.visible = false;
+  }
+  ImGui::End();
+  app->sweepOptions.visible = open;
+}
+
+void drawLoftWindow(AppState* app) {
+  if (!app->loftOptions.visible) return;
+  ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                          ImVec2(0.5f, 0.5f));
+  ImGui::SetNextWindowSize(ImVec2(420.0f, 0.0f), ImGuiCond_FirstUseEver);
+  bool open = app->loftOptions.visible;
+  if (ImGui::Begin("Loft Tool", &open)) {
+    std::vector<const char*> names;
+    for (const auto& sk : app->sketches) names.push_back(sk.meta.name.data());
+    int a = std::clamp(app->loftOptions.sourceSketchA, 0,
+                       std::max(0, static_cast<int>(app->sketches.size()) - 1));
+    int b = std::clamp(app->loftOptions.sourceSketchB, 0,
+                       std::max(0, static_cast<int>(app->sketches.size()) - 1));
+    ImGui::Combo("Source Sketch A", &a, names.data(), static_cast<int>(names.size()));
+    ImGui::Combo("Source Sketch B", &b, names.data(), static_cast<int>(names.size()));
+    app->loftOptions.sourceSketchA = a;
+    app->loftOptions.sourceSketchB = b;
+    if (ImGui::Button("Apply Loft")) {
+      const auto& skA = app->sketches[a];
+      const auto& skB = app->sketches[b];
+      StlMesh mesh = loftMesh(skA.sketch.closedProfiles(), skA.plane, skA.offsetMm,
+                              skB.sketch.closedProfiles(), skB.plane, skB.offsetMm);
+      if (a == b || mesh.empty() || !applyAddExtrude(app, mesh, {})) {
+        app->status = "Loft failed";
+      } else {
+        SolidFeatureAction action;
+        action.featureName = "Loft";
+        action.sourceNames = {std::string(skA.meta.name.data()), std::string(skB.meta.name.data())};
+        action.resultObjectName = objectName(app, static_cast<int>(app->sceneObjects.size()) - 1);
+        app->timeline.push(std::move(action), "Loft");
+        app->timelineCursor = app->timeline.size() - 1;
+        app->status = "Loft complete";
+        app->loftOptions.visible = false;
+      }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Close")) app->loftOptions.visible = false;
+  }
+  ImGui::End();
+  app->loftOptions.visible = open;
+}
+
+void drawShellWindow(AppState* app) {
+  if (!app->shellOptions.visible) return;
+  ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                          ImVec2(0.5f, 0.5f));
+  ImGui::SetNextWindowSize(ImVec2(420.0f, 0.0f), ImGuiCond_FirstUseEver);
+  bool open = app->shellOptions.visible;
+  if (ImGui::Begin("Shell Tool", &open)) {
+    ImGui::Text("Target: %s", objectName(app, app->shellOptions.targetObject).c_str());
+    ImGui::InputText("Thickness", app->shellOptions.thicknessBuffer,
+                     sizeof(app->shellOptions.thicknessBuffer));
+    if (ImGui::Button("Apply Shell")) {
+      auto parsed = parseDimension(std::string(app->shellOptions.thicknessBuffer), app->project.defaultUnit);
+      StlMesh mesh = parsed && app->shellOptions.targetObject >= 0 &&
+                             app->shellOptions.targetObject < static_cast<int>(app->sceneObjects.size())
+                         ? shellMesh(app->sceneObjects[app->shellOptions.targetObject], parsed->valueMm)
+                         : StlMesh();
+      if (mesh.empty() || !applyAddExtrude(app, mesh, {})) {
+        app->status = "Shell failed";
+      } else {
+        SolidFeatureAction action;
+        action.featureName = "Shell";
+        action.sourceNames = {objectName(app, app->shellOptions.targetObject)};
+        action.resultObjectName = objectName(app, static_cast<int>(app->sceneObjects.size()) - 1);
+        app->timeline.push(std::move(action), "Shell");
+        app->timelineCursor = app->timeline.size() - 1;
+        app->status = "Shell complete";
+        app->shellOptions.visible = false;
+      }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Close")) app->shellOptions.visible = false;
+  }
+  ImGui::End();
+  app->shellOptions.visible = open;
 }
 
 void drawCombineWindow(AppState* app) {

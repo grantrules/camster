@@ -65,12 +65,25 @@ struct CombineAction {
   std::string resultObjectName;
 };
 
+struct SolidFeatureAction {
+  std::string featureName;
+  std::vector<std::string> sourceNames;
+  std::string resultObjectName;
+};
+
+struct ReferenceGeometryAction {
+  std::string geometryType;
+  std::string name;
+};
+
 using HistoryAction = std::variant<
   CreatePlaneAction,
     CreateSketchAction,
     EditSketchAction,
     ExtrudeAction,
-    CombineAction>;
+    CombineAction,
+    SolidFeatureAction,
+    ReferenceGeometryAction>;
 
 // ---- Timeline entry -------------------------------------------------
 

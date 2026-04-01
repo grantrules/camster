@@ -14,10 +14,10 @@
 - [x] Timeline-integrated sketch editing lifecycle
 
 ## M3: Solid Modeling v1
-- [ ] Feature set: extrude, revolve, sweep, loft, shell, draft
+- [x] Feature set: extrude, revolve, sweep, loft, shell, draft
 - [x] Booleans: union/subtract/intersect
 - [x] Fillet/chamfer baseline with reference persistence strategy
-- [ ] Robust reference geometry (planes/axes/points)
+- [x] Robust reference geometry (planes/axes/points)
 
 ## M4: CAM MVP
 - [ ] 2.5D ops: facing, pocket, contour, drilling

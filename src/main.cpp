@@ -1013,12 +1013,44 @@ int main() {
       }
     }
 
+    for (int i = 0; i < static_cast<int>(app.referenceAxes.size()); ++i) {
+      const auto& axis = app.referenceAxes[i];
+      if (!axis.meta.visible) continue;
+      const glm::vec4 color = hasIndex(app.browserSelectedAxes, i)
+                                  ? glm::vec4(1.0f, 0.85f, 0.2f, 1.0f)
+                                  : glm::vec4(0.9f, 0.35f, 0.2f, 0.9f);
+      const glm::vec3 dir = glm::normalize(axis.direction);
+      const glm::vec3 a = axis.origin - dir * axis.displayLengthMm * 0.5f;
+      const glm::vec3 b = axis.origin + dir * axis.displayLengthMm * 0.5f;
+      allLines.push_back({a, color});
+      allLines.push_back({b, color});
+    }
+
+    for (int i = 0; i < static_cast<int>(app.referencePoints.size()); ++i) {
+      const auto& point = app.referencePoints[i];
+      if (!point.meta.visible) continue;
+      const glm::vec4 color = hasIndex(app.browserSelectedPoints, i)
+                                  ? glm::vec4(1.0f, 0.85f, 0.2f, 1.0f)
+                                  : glm::vec4(0.2f, 0.9f, 0.9f, 0.9f);
+      constexpr float kPointSize = 2.5f;
+      allLines.push_back({point.position + glm::vec3(-kPointSize, 0.0f, 0.0f), color});
+      allLines.push_back({point.position + glm::vec3(kPointSize, 0.0f, 0.0f), color});
+      allLines.push_back({point.position + glm::vec3(0.0f, -kPointSize, 0.0f), color});
+      allLines.push_back({point.position + glm::vec3(0.0f, kPointSize, 0.0f), color});
+      allLines.push_back({point.position + glm::vec3(0.0f, 0.0f, -kPointSize), color});
+      allLines.push_back({point.position + glm::vec3(0.0f, 0.0f, kPointSize), color});
+    }
+
     app.renderer.setLines(allLines);
 
     drawPanel(&app);
     drawObjectBrowserWindow(&app);
     drawTimelineWindow(&app);
     drawSolidExtrudeWindow(&app);
+    drawRevolveWindow(&app);
+    drawSweepWindow(&app);
+    drawLoftWindow(&app);
+    drawShellWindow(&app);
     drawNewPlaneWindow(&app);
     drawNewSketchWindow(&app);
     drawProjectToolWindow(&app);

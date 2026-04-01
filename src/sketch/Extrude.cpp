@@ -10,6 +10,79 @@ namespace {
 
 float cross2D(glm::vec2 a, glm::vec2 b) { return a.x * b.y - a.y * b.x; }
 
+glm::vec3 rotateAroundAxis(glm::vec3 point, glm::vec3 axisOrigin,
+                           glm::vec3 axisDir, float angleRad) {
+  const glm::vec3 p = point - axisOrigin;
+  const glm::vec3 k = glm::normalize(axisDir);
+  const float c = std::cos(angleRad);
+  const float s = std::sin(angleRad);
+  const glm::vec3 rotated = p * c + glm::cross(k, p) * s + k * glm::dot(k, p) * (1.0f - c);
+  return axisOrigin + rotated;
+}
+
+glm::vec3 planeAxisDirection(SketchPlane plane, int axisMode) {
+  switch (plane) {
+    case SketchPlane::XY:
+      return axisMode == 0 ? glm::vec3(1.0f, 0.0f, 0.0f) : glm::vec3(0.0f, 1.0f, 0.0f);
+    case SketchPlane::XZ:
+      return axisMode == 0 ? glm::vec3(1.0f, 0.0f, 0.0f) : glm::vec3(0.0f, 0.0f, 1.0f);
+    case SketchPlane::YZ:
+      return axisMode == 0 ? glm::vec3(0.0f, 1.0f, 0.0f) : glm::vec3(0.0f, 0.0f, 1.0f);
+  }
+  return glm::vec3(0.0f, 0.0f, 1.0f);
+}
+
+glm::vec3 sweepDirectionFromAxisMode(int axisMode) {
+  switch (axisMode) {
+    case 0: return {1.0f, 0.0f, 0.0f};
+    case 1: return {0.0f, 1.0f, 0.0f};
+    default: return {0.0f, 0.0f, 1.0f};
+  }
+}
+
+std::vector<glm::vec2> resampleClosedProfile(const std::vector<glm::vec2>& input, int samples) {
+  std::vector<glm::vec2> poly = input;
+  if (poly.size() > 1 && glm::length(poly.front() - poly.back()) < 0.001f) {
+    poly.pop_back();
+  }
+  if (poly.size() < 3 || samples < 3) return poly;
+
+  std::vector<float> lengths(poly.size() + 1, 0.0f);
+  for (size_t i = 0; i < poly.size(); ++i) {
+    const size_t j = (i + 1) % poly.size();
+    lengths[i + 1] = lengths[i] + glm::length(poly[j] - poly[i]);
+  }
+  const float total = lengths.back();
+  if (total <= 1e-6f) return poly;
+
+  std::vector<glm::vec2> out;
+  out.reserve(samples + 1);
+  for (int s = 0; s < samples; ++s) {
+    const float target = total * static_cast<float>(s) / static_cast<float>(samples);
+    size_t seg = 0;
+    while (seg + 1 < lengths.size() && lengths[seg + 1] < target) ++seg;
+    const size_t next = (seg + 1) % poly.size();
+    const float segLen = lengths[seg + 1] - lengths[seg];
+    const float t = segLen > 1e-6f ? (target - lengths[seg]) / segLen : 0.0f;
+    out.push_back(glm::mix(poly[seg], poly[next], t));
+  }
+  out.push_back(out.front());
+  return out;
+}
+
+void appendTriangle(std::vector<StlVertex>& vertices, std::vector<uint32_t>& indices,
+                    glm::vec3 a, glm::vec3 b, glm::vec3 c) {
+  glm::vec3 n = glm::normalize(glm::cross(b - a, c - a));
+  if (glm::dot(n, n) < 1e-8f) n = {0.0f, 0.0f, 1.0f};
+  const uint32_t base = static_cast<uint32_t>(vertices.size());
+  vertices.push_back({a, n});
+  vertices.push_back({b, n});
+  vertices.push_back({c, n});
+  indices.push_back(base);
+  indices.push_back(base + 1);
+  indices.push_back(base + 2);
+}
+
 int planeWindingSign(SketchPlane plane) {
   // toWorld basis orientation relative to planeNormal:
   // XY: +1, XZ: -1, YZ: +1
@@ -269,4 +342,141 @@ StlMesh extrudeMesh(const std::vector<std::vector<glm::vec2>>& profiles,
   }
 
   return StlMesh::fromGeometry(std::move(vertices), std::move(indices));
+}
+
+StlMesh revolveMesh(const std::vector<std::vector<glm::vec2>>& profiles,
+                    SketchPlane plane, float planeOffsetMm,
+                    int axisMode, float angleDegrees, int segments) {
+  if (profiles.empty() || std::abs(angleDegrees) < 1e-4f || segments < 3) return {};
+  constexpr float kPiRevolve = 3.14159265358979f;
+  const float angleRad = angleDegrees * kPiRevolve / 180.0f;
+  const glm::vec3 axisOrigin = toWorld(glm::vec2(0.0f), plane, planeOffsetMm);
+  const glm::vec3 axisDir = planeAxisDirection(plane, axisMode);
+
+  std::vector<StlVertex> vertices;
+  std::vector<uint32_t> indices;
+  for (const auto& profile : profiles) {
+    auto ring2d = resampleClosedProfile(profile, 64);
+    if (ring2d.size() < 4) continue;
+    ring2d.pop_back();
+    const size_t ringSize = ring2d.size();
+
+    std::vector<std::vector<glm::vec3>> rings(segments + 1, std::vector<glm::vec3>(ringSize));
+    for (int s = 0; s <= segments; ++s) {
+      const float t = static_cast<float>(s) / static_cast<float>(segments);
+      const float step = angleRad * t;
+      for (size_t i = 0; i < ringSize; ++i) {
+        const glm::vec3 base = toWorld(ring2d[i], plane, planeOffsetMm);
+        rings[s][i] = rotateAroundAxis(base, axisOrigin, axisDir, step);
+      }
+    }
+
+    for (int s = 0; s < segments; ++s) {
+      for (size_t i = 0; i < ringSize; ++i) {
+        const size_t j = (i + 1) % ringSize;
+        appendTriangle(vertices, indices, rings[s][i], rings[s][j], rings[s + 1][j]);
+        appendTriangle(vertices, indices, rings[s][i], rings[s + 1][j], rings[s + 1][i]);
+      }
+    }
+  }
+
+  return StlMesh::fromGeometry(std::move(vertices), std::move(indices));
+}
+
+StlMesh sweepMesh(const std::vector<std::vector<glm::vec2>>& profiles,
+                  SketchPlane plane, float planeOffsetMm,
+                  int axisMode, float distanceMm) {
+  const glm::vec3 dir = sweepDirectionFromAxisMode(axisMode) * distanceMm;
+  if (profiles.empty() || glm::length(dir) < 1e-6f) return {};
+
+  std::vector<StlVertex> vertices;
+  std::vector<uint32_t> indices;
+  for (const auto& profile : profiles) {
+    auto ring = resampleClosedProfile(profile, 64);
+    if (ring.size() < 4) continue;
+    ring.pop_back();
+    const size_t n = ring.size();
+    std::vector<glm::vec3> front(n), back(n);
+    for (size_t i = 0; i < n; ++i) {
+      front[i] = toWorld(ring[i], plane, planeOffsetMm);
+      back[i] = front[i] + dir;
+    }
+    const auto tris = earClip(profile);
+    for (const auto& tri : tris) {
+      appendTriangle(vertices, indices, toWorld(profile[tri[2]], plane, planeOffsetMm),
+                     toWorld(profile[tri[1]], plane, planeOffsetMm),
+                     toWorld(profile[tri[0]], plane, planeOffsetMm));
+      appendTriangle(vertices, indices, toWorld(profile[tri[0]], plane, planeOffsetMm) + dir,
+                     toWorld(profile[tri[1]], plane, planeOffsetMm) + dir,
+                     toWorld(profile[tri[2]], plane, planeOffsetMm) + dir);
+    }
+    for (size_t i = 0; i < n; ++i) {
+      const size_t j = (i + 1) % n;
+      appendTriangle(vertices, indices, front[i], front[j], back[j]);
+      appendTriangle(vertices, indices, front[i], back[j], back[i]);
+    }
+  }
+  return StlMesh::fromGeometry(std::move(vertices), std::move(indices));
+}
+
+StlMesh loftMesh(const std::vector<std::vector<glm::vec2>>& profilesA,
+                 SketchPlane planeA, float offsetA,
+                 const std::vector<std::vector<glm::vec2>>& profilesB,
+                 SketchPlane planeB, float offsetB,
+                 int samples) {
+  if (profilesA.empty() || profilesB.empty()) return {};
+  auto a = resampleClosedProfile(profilesA.front(), samples);
+  auto b = resampleClosedProfile(profilesB.front(), samples);
+  if (a.size() < 4 || b.size() < 4) return {};
+  a.pop_back();
+  b.pop_back();
+  const size_t n = std::min(a.size(), b.size());
+
+  std::vector<StlVertex> vertices;
+  std::vector<uint32_t> indices;
+  for (size_t i = 0; i < n; ++i) {
+    const size_t j = (i + 1) % n;
+    const glm::vec3 a0 = toWorld(a[i], planeA, offsetA);
+    const glm::vec3 a1 = toWorld(a[j], planeA, offsetA);
+    const glm::vec3 b1 = toWorld(b[j], planeB, offsetB);
+    const glm::vec3 b0 = toWorld(b[i], planeB, offsetB);
+    appendTriangle(vertices, indices, a0, a1, b1);
+    appendTriangle(vertices, indices, a0, b1, b0);
+  }
+  const auto capA = earClip(a);
+  for (const auto& tri : capA) {
+    appendTriangle(vertices, indices, toWorld(a[tri[2]], planeA, offsetA),
+                   toWorld(a[tri[1]], planeA, offsetA), toWorld(a[tri[0]], planeA, offsetA));
+  }
+  const auto capB = earClip(b);
+  for (const auto& tri : capB) {
+    appendTriangle(vertices, indices, toWorld(b[tri[0]], planeB, offsetB),
+                   toWorld(b[tri[1]], planeB, offsetB), toWorld(b[tri[2]], planeB, offsetB));
+  }
+  return StlMesh::fromGeometry(std::move(vertices), std::move(indices));
+}
+
+StlMesh shellMesh(const StlMesh& mesh, float thicknessMm) {
+  if (mesh.empty() || std::abs(thicknessMm) < 1e-4f) return {};
+  auto outer = mesh.vertices();
+  auto inner = mesh.vertices();
+  const auto& inds = mesh.indices();
+  for (auto& v : inner) {
+    v.position -= v.normal * thicknessMm;
+    v.normal = -v.normal;
+  }
+  std::vector<StlVertex> verts;
+  std::vector<uint32_t> outInds;
+  verts.reserve(outer.size() + inner.size());
+  outInds.reserve(inds.size() * 2);
+  verts.insert(verts.end(), outer.begin(), outer.end());
+  verts.insert(verts.end(), inner.begin(), inner.end());
+  outInds.insert(outInds.end(), inds.begin(), inds.end());
+  const uint32_t innerBase = static_cast<uint32_t>(outer.size());
+  for (size_t i = 0; i + 2 < inds.size(); i += 3) {
+    outInds.push_back(innerBase + inds[i + 0]);
+    outInds.push_back(innerBase + inds[i + 2]);
+    outInds.push_back(innerBase + inds[i + 1]);
+  }
+  return StlMesh::fromGeometry(std::move(verts), std::move(outInds));
 }

@@ -38,7 +38,7 @@ enum class ObjectPickMode {
   ChamferEdges,
   FilletEdges,
 };
-enum class BrowserSection { Objects, Planes, Sketches };
+enum class BrowserSection { Objects, Planes, Sketches, Axes, Points };
 enum class PlaneReferenceSource { Plane, Face };
 
 struct ChamferEdgeSelection {
@@ -83,6 +83,32 @@ struct DraftOptionsState {
   bool visible = false;
   int targetObject = -1;
   char angleBuffer[64] = {};
+};
+
+struct RevolveOptionsState {
+  bool visible = false;
+  int sourceSketch = -1;
+  int axisMode = 0;
+  char angleBuffer[64] = {};
+};
+
+struct SweepOptionsState {
+  bool visible = false;
+  int sourceSketch = -1;
+  int axisMode = 2;
+  char distanceBuffer[64] = {};
+};
+
+struct LoftOptionsState {
+  bool visible = false;
+  int sourceSketchA = -1;
+  int sourceSketchB = -1;
+};
+
+struct ShellOptionsState {
+  bool visible = false;
+  int targetObject = -1;
+  char thicknessBuffer[64] = {};
 };
 
 struct SolidExtrudeOptionsState {
@@ -138,9 +164,13 @@ struct AppState {
   std::vector<int> browserSelectedObjects;
   std::vector<int> browserSelectedPlanes;
   std::vector<int> browserSelectedSketches;
+  std::vector<int> browserSelectedAxes;
+  std::vector<int> browserSelectedPoints;
   int objectSelectionAnchor = -1;
   int planeSelectionAnchor = -1;
   int sketchSelectionAnchor = -1;
+  int axisSelectionAnchor = -1;
+  int pointSelectionAnchor = -1;
   int renameObjectIndex = -1;
   int renamePlaneIndex = -1;
   int renameSketchIndex = -1;
@@ -155,16 +185,24 @@ struct AppState {
   ChamferOptionsState chamferOptions;
   FilletOptionsState filletOptions;
   DraftOptionsState draftOptions;
+  RevolveOptionsState revolveOptions;
+  SweepOptionsState sweepOptions;
+  LoftOptionsState loftOptions;
+  ShellOptionsState shellOptions;
   SolidExtrudeOptionsState solidExtrudeOptions;
 
   // Scene / sketch state.
   SceneMode sceneMode = SceneMode::View3D;
   std::vector<PlaneEntry> planes;
   std::vector<SketchEntry> sketches;
+  std::vector<ReferenceAxisEntry> referenceAxes;
+  std::vector<ReferencePointEntry> referencePoints;
   int activeSketchIndex = -1;
   int nextPlaneId = 1;
   int nextPlaneNumber = 1;
   int nextSketchNumber = 1;
+  int nextAxisNumber = 1;
+  int nextPointNumber = 1;
   SketchCreateState sketchCreate;
   PlaneCreateState planeCreate;
   std::optional<int> hoveredPlaneId;

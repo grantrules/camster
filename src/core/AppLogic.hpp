@@ -47,6 +47,8 @@ void createSketch(AppState* app, int planeId);
 void createOffsetPlaneFromPlane(AppState* app, int parentPlaneId, float distanceMm);
 void createOffsetPlaneFromFace(AppState* app, int sourceObjectIndex,
                                SketchPlane plane, int faceSign, float distanceMm);
+void createReferencePointFromSelection(AppState* app);
+void createReferenceAxisFromSelection(AppState* app);
 void appendSceneObject(AppState* app, StlMesh mesh);
 void clearSceneObjects(AppState* app);
 
