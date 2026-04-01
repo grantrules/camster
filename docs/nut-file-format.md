@@ -127,6 +127,16 @@ Non-breaking change examples:
 - Adding optional files
 - Adding new action types that older readers can safely ignore (if designed for it)
 
+Reader policy implemented in code:
+
+- Supported readable range is `CAMSTER_NUT_MIN_READABLE_FORMAT_VERSION..CAMSTER_NUT_FORMAT_VERSION`.
+- A legacy `formatVersion=0` metadata record is migrated in-memory to the current
+  version before normal validation.
+- Metadata validation enforces:
+  - `timelineLength >= 0`
+  - `activeTimelineIndex >= -1`
+  - `activeTimelineIndex < timelineLength` when `timelineLength > 0`
+
 ## 6. Source-of-Truth Policy
 
 Any change to `.nut` schema or semantics must update this document in the same change.
@@ -145,3 +155,11 @@ If the change is breaking, it must also:
 - Required files: `metadata.json`, `state.json`, `history.json`
 - Optional thumbnail support via `thumbnail.png`
 - Mandatory `formatVersion` field in metadata
+
+### v1 (implementation notes, 2026-04-01)
+
+- Added explicit metadata validation and migration hooks in source:
+  - `nutFormatVersionSupported`
+  - `validateNutMetadata`
+  - `migrateNutMetadataInPlace`
+- Added readable-version floor constant: `CAMSTER_NUT_MIN_READABLE_FORMAT_VERSION`

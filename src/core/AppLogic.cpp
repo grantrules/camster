@@ -73,6 +73,104 @@ bool aabbOverlap(const Aabb& a, const Aabb& b) {
          a.min.z <= b.max.z && a.max.z >= b.min.z;
 }
 
+void normalizeDeterministicAppState(AppState* app) {
+  if (!app) return;
+
+  const auto sanitizeIndices = [](std::vector<int>& list, int objectCount) {
+    list.erase(std::remove_if(list.begin(), list.end(), [objectCount](int idx) {
+                 return idx < 0 || idx >= objectCount;
+               }),
+               list.end());
+    std::sort(list.begin(), list.end());
+    list.erase(std::unique(list.begin(), list.end()), list.end());
+  };
+
+  if (app->sceneObjectMeta.size() < app->sceneObjects.size()) {
+    const size_t prev = app->sceneObjectMeta.size();
+    app->sceneObjectMeta.resize(app->sceneObjects.size());
+    for (size_t i = prev; i < app->sceneObjectMeta.size(); ++i) {
+      ObjectMetadata meta;
+      setName(meta.name, "Object " + std::to_string(app->nextObjectNumber++));
+      meta.visible = true;
+      meta.locked = false;
+      app->sceneObjectMeta[i] = meta;
+    }
+  } else if (app->sceneObjectMeta.size() > app->sceneObjects.size()) {
+    app->sceneObjectMeta.resize(app->sceneObjects.size());
+  }
+
+  sanitizeIndices(app->browserSelectedObjects,
+                  static_cast<int>(app->sceneObjects.size()));
+  sanitizeIndices(app->extrudeOptions.targets,
+                  static_cast<int>(app->sceneObjects.size()));
+  sanitizeIndices(app->combineOptions.targets,
+                  static_cast<int>(app->sceneObjects.size()));
+  sanitizeIndices(app->combineOptions.tools,
+                  static_cast<int>(app->sceneObjects.size()));
+
+  if (app->selectedObject < -1 ||
+      app->selectedObject >= static_cast<int>(app->sceneObjects.size())) {
+    app->selectedObject = -1;
+  }
+
+  if (!app->browserSelectedObjects.empty()) {
+    app->selectedObject = app->browserSelectedObjects.front();
+  }
+
+  if (app->sceneObjects.empty()) {
+    app->selectedObject = -1;
+    app->browserSelectedObjects.clear();
+  }
+
+  if (app->timelineCursor >= app->timeline.size()) {
+    app->timelineCursor = app->timeline.size() - 1;
+  }
+}
+
+void restoreObjectSnapshot(AppState* app, ObjectEditSnapshot snapshot) {
+  if (!app) return;
+  app->sceneObjects = std::move(snapshot.sceneObjects);
+  app->sceneObjectMeta = std::move(snapshot.sceneObjectMeta);
+  app->selectedObject = snapshot.selectedObject;
+  app->nextObjectNumber = snapshot.nextObjectNumber;
+  app->browserSelectedObjects = std::move(snapshot.browserSelectedObjects);
+  normalizeDeterministicAppState(app);
+}
+
+bool verifyObjectStateRoundTrip(const AppState& app, std::string& error) {
+  ObjectEditSnapshot snap;
+  snap.sceneObjects = app.sceneObjects;
+  snap.sceneObjectMeta = app.sceneObjectMeta;
+  snap.selectedObject = app.selectedObject;
+  snap.nextObjectNumber = app.nextObjectNumber;
+  snap.browserSelectedObjects = app.browserSelectedObjects;
+
+  const std::vector<StlMesh> objectsCopy = snap.sceneObjects;
+  const std::vector<ObjectMetadata> metaCopy = snap.sceneObjectMeta;
+
+  if (objectsCopy.size() != app.sceneObjects.size() ||
+      metaCopy.size() != app.sceneObjectMeta.size()) {
+    error = "object snapshot round-trip size mismatch";
+    return false;
+  }
+
+  for (size_t i = 0; i < objectsCopy.size(); ++i) {
+    if (objectsCopy[i].vertices().size() != app.sceneObjects[i].vertices().size() ||
+        objectsCopy[i].indices().size() != app.sceneObjects[i].indices().size()) {
+      error = "object snapshot round-trip geometry mismatch";
+      return false;
+    }
+    if (std::string(metaCopy[i].name.data()) != std::string(app.sceneObjectMeta[i].name.data()) ||
+        metaCopy[i].visible != app.sceneObjectMeta[i].visible ||
+        metaCopy[i].locked != app.sceneObjectMeta[i].locked) {
+      error = "object snapshot round-trip metadata mismatch";
+      return false;
+    }
+  }
+
+  return true;
+}
+
 float rayTriangle(glm::vec3 origin, glm::vec3 dir, glm::vec3 v0, glm::vec3 v1, glm::vec3 v2) {
   const glm::vec3 e1 = v1 - v0;
   const glm::vec3 e2 = v2 - v0;
@@ -456,9 +554,130 @@ void appendSceneObject(AppState* app, StlMesh mesh) {
 void randomizeObjectColor(AppState* app, int objectIndex) {
   if (!app) return;
   if (objectIndex < 0 || objectIndex >= static_cast<int>(app->sceneObjectMeta.size())) return;
+  pushObjectUndoSnapshot(app);
   const glm::vec3 color = randomPastelColor();
   app->sceneObjectMeta[objectIndex].colorRgb = {color.x, color.y, color.z};
   rebuildCombinedMesh(app);
+}
+
+bool setObjectVisibility(AppState* app, int objectIndex, bool visible) {
+  if (!app) return false;
+  if (objectIndex < 0 || objectIndex >= static_cast<int>(app->sceneObjectMeta.size())) return false;
+  if (app->sceneObjectMeta[objectIndex].visible == visible) return false;
+  pushObjectUndoSnapshot(app);
+  app->sceneObjectMeta[objectIndex].visible = visible;
+  rebuildCombinedMesh(app);
+  return true;
+}
+
+bool setObjectLocked(AppState* app, int objectIndex, bool locked) {
+  if (!app) return false;
+  if (objectIndex < 0 || objectIndex >= static_cast<int>(app->sceneObjectMeta.size())) return false;
+  if (app->sceneObjectMeta[objectIndex].locked == locked) return false;
+  pushObjectUndoSnapshot(app);
+  app->sceneObjectMeta[objectIndex].locked = locked;
+  return true;
+}
+
+bool renameObject(AppState* app, int objectIndex, const std::string& newNameRaw) {
+  if (!app) return false;
+  if (objectIndex < 0 || objectIndex >= static_cast<int>(app->sceneObjectMeta.size())) return false;
+
+  std::string newName = newNameRaw;
+  if (newName.empty()) return false;
+  if (newName == app->sceneObjectMeta[objectIndex].name.data()) return false;
+
+  pushObjectUndoSnapshot(app);
+
+  const std::string oldName = app->sceneObjectMeta[objectIndex].name.data();
+  setName(app->sceneObjectMeta[objectIndex].name, newName);
+  const std::string appliedName = app->sceneObjectMeta[objectIndex].name.data();
+  for (auto& plane : app->planes) {
+    if (plane.reference.kind == PlaneReferenceKind::OffsetFromFace &&
+        plane.reference.sourceObjectName == oldName) {
+      plane.reference.sourceObjectName = appliedName;
+    }
+  }
+  return true;
+}
+
+void pushObjectUndoSnapshot(AppState* app) {
+  if (!app) return;
+  ObjectEditSnapshot snap;
+  snap.sceneObjects = app->sceneObjects;
+  snap.sceneObjectMeta = app->sceneObjectMeta;
+  snap.selectedObject = app->selectedObject;
+  snap.nextObjectNumber = app->nextObjectNumber;
+  snap.browserSelectedObjects = app->browserSelectedObjects;
+  app->objectUndoStack.push_back(std::move(snap));
+  constexpr size_t kMaxObjectUndoLevels = 64;
+  if (app->objectUndoStack.size() > kMaxObjectUndoLevels) {
+    app->objectUndoStack.erase(app->objectUndoStack.begin());
+  }
+  app->objectRedoStack.clear();
+}
+
+bool objectCanUndo(const AppState* app) {
+  return app && !app->objectUndoStack.empty();
+}
+
+bool objectCanRedo(const AppState* app) {
+  return app && !app->objectRedoStack.empty();
+}
+
+bool objectUndo(AppState* app) {
+  if (!objectCanUndo(app)) return false;
+  ObjectEditSnapshot current;
+  current.sceneObjects = app->sceneObjects;
+  current.sceneObjectMeta = app->sceneObjectMeta;
+  current.selectedObject = app->selectedObject;
+  current.nextObjectNumber = app->nextObjectNumber;
+  current.browserSelectedObjects = app->browserSelectedObjects;
+  app->objectRedoStack.push_back(std::move(current));
+
+  ObjectEditSnapshot snap = std::move(app->objectUndoStack.back());
+  app->objectUndoStack.pop_back();
+  restoreObjectSnapshot(app, std::move(snap));
+  rebuildCombinedMesh(app);
+  return true;
+}
+
+bool objectRedo(AppState* app) {
+  if (!objectCanRedo(app)) return false;
+  ObjectEditSnapshot current;
+  current.sceneObjects = app->sceneObjects;
+  current.sceneObjectMeta = app->sceneObjectMeta;
+  current.selectedObject = app->selectedObject;
+  current.nextObjectNumber = app->nextObjectNumber;
+  current.browserSelectedObjects = app->browserSelectedObjects;
+  app->objectUndoStack.push_back(std::move(current));
+
+  ObjectEditSnapshot snap = std::move(app->objectRedoStack.back());
+  app->objectRedoStack.pop_back();
+  restoreObjectSnapshot(app, std::move(snap));
+  rebuildCombinedMesh(app);
+  return true;
+}
+
+bool validateDeterministicAppState(const AppState* app, std::string& error) {
+  if (!app) {
+    error = "null AppState";
+    return false;
+  }
+  if (app->sceneObjectMeta.size() != app->sceneObjects.size()) {
+    error = "scene object/meta count mismatch";
+    return false;
+  }
+  if (app->selectedObject < -1 ||
+      app->selectedObject >= static_cast<int>(app->sceneObjects.size())) {
+    error = "selectedObject out of range";
+    return false;
+  }
+  if (app->timelineCursor < -1 || app->timelineCursor >= app->timeline.size()) {
+    error = "timeline cursor out of range";
+    return false;
+  }
+  return true;
 }
 
 void clearSceneObjects(AppState* app) {
@@ -495,15 +714,7 @@ void commitObjectRename(AppState* app) {
     app->renameObjectIndex = -1;
     return;
   }
-  const std::string oldName = app->sceneObjectMeta[app->renameObjectIndex].name.data();
-  setName(app->sceneObjectMeta[app->renameObjectIndex].name, app->renameBuffer.data());
-  const std::string newName = app->sceneObjectMeta[app->renameObjectIndex].name.data();
-  for (auto& plane : app->planes) {
-    if (plane.reference.kind == PlaneReferenceKind::OffsetFromFace &&
-        plane.reference.sourceObjectName == oldName) {
-      plane.reference.sourceObjectName = newName;
-    }
-  }
+  renameObject(app, app->renameObjectIndex, app->renameBuffer.data());
   app->renameObjectIndex = -1;
 }
 
@@ -532,6 +743,8 @@ void deleteSceneObjects(AppState* app, const std::vector<int>& rawIndices) {
                 }),
                 indices.end());
   if (indices.empty()) return;
+
+  pushObjectUndoSnapshot(app);
 
   std::vector<bool> remove(app->sceneObjects.size(), false);
   for (int idx : indices) remove[idx] = true;
@@ -563,6 +776,17 @@ void deleteSceneObjects(AppState* app, const std::vector<int>& rawIndices) {
 }
 
 void rebuildCombinedMesh(AppState* app) {
+  normalizeDeterministicAppState(app);
+
+  std::string deterministicError;
+  if (!validateDeterministicAppState(app, deterministicError)) {
+    app->status = "State normalized warning: " + deterministicError;
+  }
+  std::string roundTripError;
+  if (!verifyObjectStateRoundTrip(*app, roundTripError)) {
+    app->status = "Round-trip warning: " + roundTripError;
+  }
+
   sanitizeObjectIndices(app->browserSelectedObjects, static_cast<int>(app->sceneObjects.size()));
   syncSelectedObjectFromBrowser(app);
   app->mesh = StlMesh();
@@ -584,6 +808,7 @@ void rebuildCombinedMesh(AppState* app) {
 bool applyAddExtrude(AppState* app, const StlMesh& extruded,
                      const std::vector<int>& targetsRaw) {
   if (extruded.empty()) return false;
+  pushObjectUndoSnapshot(app);
 
   std::vector<int> targets = targetsRaw;
   sanitizeObjectIndices(targets, static_cast<int>(app->sceneObjects.size()));
@@ -639,6 +864,7 @@ bool applyAddExtrude(AppState* app, const StlMesh& extruded,
 
 bool applyAddCombine(AppState* app, const std::vector<int>& targetsRaw,
                      const std::vector<int>& toolsRaw, bool keepTools) {
+  pushObjectUndoSnapshot(app);
   std::vector<int> targets = targetsRaw;
   std::vector<int> tools = toolsRaw;
   sanitizeObjectIndices(targets, static_cast<int>(app->sceneObjects.size()));
@@ -698,6 +924,7 @@ bool applyAddCombine(AppState* app, const std::vector<int>& targetsRaw,
 bool applySubtractExtrude(AppState* app, const StlMesh& extruded,
                           const std::vector<int>& targetsRaw) {
   if (extruded.empty()) return false;
+  pushObjectUndoSnapshot(app);
 
   std::vector<int> targets = targetsRaw;
   sanitizeObjectIndices(targets, static_cast<int>(app->sceneObjects.size()));
@@ -741,6 +968,7 @@ bool applySubtractExtrude(AppState* app, const StlMesh& extruded,
 
 bool applySubtractCombine(AppState* app, const std::vector<int>& targetsRaw,
                           const std::vector<int>& toolsRaw, bool keepTools) {
+  pushObjectUndoSnapshot(app);
   std::vector<int> targets = targetsRaw;
   std::vector<int> tools = toolsRaw;
   sanitizeObjectIndices(targets, static_cast<int>(app->sceneObjects.size()));
@@ -810,6 +1038,8 @@ bool applyChamferEdges(AppState* app, int objectIndex,
       app->sceneObjectMeta[objectIndex].locked) {
     return false;
   }
+
+  pushObjectUndoSnapshot(app);
 
   const StlMesh& srcMesh = app->sceneObjects[objectIndex];
   auto verts = srcMesh.vertices();

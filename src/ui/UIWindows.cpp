@@ -919,11 +919,13 @@ void drawObjectBrowserWindow(AppState* app) {
 
         ImGui::TableSetColumnIndex(0);
         if (visibilityIconToggle("##objvis", &meta.visible)) {
-          rebuildCombinedMesh(app);
+          setObjectVisibility(app, i, meta.visible);
         }
 
         ImGui::TableSetColumnIndex(1);
-        lockIconToggle("##objlock", &meta.locked);
+        if (lockIconToggle("##objlock", &meta.locked)) {
+          setObjectLocked(app, i, meta.locked);
+        }
 
         ImGui::TableSetColumnIndex(2);
         if (renameInline) {
@@ -980,11 +982,10 @@ void drawObjectBrowserWindow(AppState* app) {
               beginObjectRename(app, i);
             }
             if (ImGui::MenuItem(meta.visible ? "Hide" : "Show")) {
-              meta.visible = !meta.visible;
-              rebuildCombinedMesh(app);
+              setObjectVisibility(app, i, !meta.visible);
             }
             if (ImGui::MenuItem(meta.locked ? "Unlock" : "Lock")) {
-              meta.locked = !meta.locked;
+              setObjectLocked(app, i, !meta.locked);
             }
             if (ImGui::MenuItem("Randomize Pastel Color")) {
               randomizeObjectColor(app, i);
