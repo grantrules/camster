@@ -4,6 +4,7 @@
 
 layout(location = 0) in vec3 fragNormal;
 layout(location = 1) in vec3 fragWorldPos;
+layout(location = 2) in vec3 fragColor;
 
 layout(binding = 0) uniform UBO {
   mat4 model;
@@ -27,7 +28,7 @@ void main() {
   vec3 lightDir = normalize(vec3(-0.4, 0.8, 0.6));
   float diff = max(dot(n, lightDir), 0.0);
   vec3 ambient = vec3(0.18, 0.2, 0.22);
-  vec3 base = vec3(0.70, 0.74, 0.80);
+  vec3 base = fragColor;
   vec3 color = ambient + diff * base;
   outColor = vec4(color, 1.0);
 }

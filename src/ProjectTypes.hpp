@@ -16,6 +16,7 @@ struct ObjectMetadata {
   std::array<char, 64> name{};
   bool visible = true;
   bool locked = false;
+  std::array<float, 3> colorRgb{0.70f, 0.74f, 0.80f};
 };
 
 struct SketchMetadata {

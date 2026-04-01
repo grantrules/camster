@@ -57,6 +57,7 @@ void commitSketchRename(AppState* app);
 void cancelBrowserRename(AppState* app);
 
 void deleteSceneObjects(AppState* app, const std::vector<int>& rawIndices);
+void randomizeObjectColor(AppState* app, int objectIndex);
 
 void rebuildCombinedMesh(AppState* app);
 

@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <random>
 #include <utility>
 
 #include <glm/common.hpp>
@@ -22,6 +23,33 @@ struct Aabb {
 template <size_t N>
 void setName(std::array<char, N>& dest, const std::string& value) {
   std::snprintf(dest.data(), dest.size(), "%s", value.c_str());
+}
+
+glm::vec3 hsvToRgb(float h, float s, float v) {
+  const float hp = h * 6.0f;
+  const int i = static_cast<int>(std::floor(hp));
+  const float f = hp - static_cast<float>(i);
+  const float p = v * (1.0f - s);
+  const float q = v * (1.0f - s * f);
+  const float t = v * (1.0f - s * (1.0f - f));
+
+  switch (i % 6) {
+    case 0: return {v, t, p};
+    case 1: return {q, v, p};
+    case 2: return {p, v, t};
+    case 3: return {p, q, v};
+    case 4: return {t, p, v};
+    case 5: return {v, p, q};
+  }
+  return {v, p, q};
+}
+
+glm::vec3 randomPastelColor() {
+  static std::mt19937 rng(std::random_device{}());
+  std::uniform_real_distribution<float> hueDist(0.0f, 1.0f);
+  std::uniform_real_distribution<float> satDist(0.28f, 0.48f);
+  std::uniform_real_distribution<float> valDist(0.88f, 0.98f);
+  return hsvToRgb(hueDist(rng), satDist(rng), valDist(rng));
 }
 
 Aabb meshAabb(const StlMesh& mesh) {
@@ -420,7 +448,17 @@ void appendSceneObject(AppState* app, StlMesh mesh) {
   setName(meta.name, "Object " + std::to_string(app->nextObjectNumber++));
   meta.visible = true;
   meta.locked = false;
+  const glm::vec3 color = randomPastelColor();
+  meta.colorRgb = {color.x, color.y, color.z};
   app->sceneObjectMeta.push_back(meta);
+}
+
+void randomizeObjectColor(AppState* app, int objectIndex) {
+  if (!app) return;
+  if (objectIndex < 0 || objectIndex >= static_cast<int>(app->sceneObjectMeta.size())) return;
+  const glm::vec3 color = randomPastelColor();
+  app->sceneObjectMeta[objectIndex].colorRgb = {color.x, color.y, color.z};
+  rebuildCombinedMesh(app);
 }
 
 void clearSceneObjects(AppState* app) {
@@ -533,7 +571,12 @@ void rebuildCombinedMesh(AppState* app) {
         !app->sceneObjectMeta[i].visible) {
       continue;
     }
-    app->mesh.append(app->sceneObjects[i]);
+    if (i < static_cast<int>(app->sceneObjectMeta.size())) {
+      const auto& c = app->sceneObjectMeta[i].colorRgb;
+      app->mesh.append(app->sceneObjects[i], glm::vec3(c[0], c[1], c[2]));
+    } else {
+      app->mesh.append(app->sceneObjects[i]);
+    }
   }
   app->renderer.setMesh(app->mesh);
 }
@@ -580,6 +623,10 @@ bool applyAddExtrude(AppState* app, const StlMesh& extruded,
   next.push_back(std::move(merged));
   ObjectMetadata mergedMeta;
   setName(mergedMeta.name, "Object " + std::to_string(app->nextObjectNumber++));
+  {
+    const glm::vec3 color = randomPastelColor();
+    mergedMeta.colorRgb = {color.x, color.y, color.z};
+  }
   nextMeta.push_back(mergedMeta);
 
   app->sceneObjects = std::move(next);
@@ -634,6 +681,10 @@ bool applyAddCombine(AppState* app, const std::vector<int>& targetsRaw,
   next.push_back(std::move(merged));
   ObjectMetadata mergedMeta;
   setName(mergedMeta.name, "Object " + std::to_string(app->nextObjectNumber++));
+  {
+    const glm::vec3 color = randomPastelColor();
+    mergedMeta.colorRgb = {color.x, color.y, color.z};
+  }
   nextMeta.push_back(mergedMeta);
 
   app->sceneObjects = std::move(next);
