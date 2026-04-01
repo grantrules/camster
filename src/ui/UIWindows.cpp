@@ -1061,11 +1061,15 @@ void drawPanel(AppState* app) {
     ImGui::TextWrapped("%s", app->lastFeatureFailure.message.c_str());
   }
 
-  ImGui::TextDisabled("Perf (ms): combine %.2f | chamfer %.2f | fillet %.2f | shell %.2f",
+  ImGui::TextDisabled("Perf (ms): combine %.2f | chamfer %.2f | fillet %.2f | shell %.2f | frame %.2f",
                       app->opPerf.combineMs, app->opPerf.chamferMs,
-                      app->opPerf.filletMs, app->opPerf.shellMs);
+                      app->opPerf.filletMs, app->opPerf.shellMs,
+                      app->opPerf.frameMs);
+  ImGui::TextDisabled("Frame budget: %.2f ms (%s)", app->opPerf.frameBudgetMs,
+                      app->opPerf.frameBudgetExceeded ? "exceeded" : "ok");
   if (app->opPerf.combineMs > 50.0f || app->opPerf.chamferMs > 40.0f ||
-      app->opPerf.filletMs > 60.0f || app->opPerf.shellMs > 80.0f) {
+      app->opPerf.filletMs > 60.0f || app->opPerf.shellMs > 80.0f ||
+      app->opPerf.frameBudgetExceeded) {
     ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.25f, 1.0f),
                        "Perf regression threshold exceeded");
   }

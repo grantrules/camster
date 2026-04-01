@@ -43,10 +43,10 @@
 - [x] DFM checks: wall thickness, minimum radius, drillability heuristics
 
 ## M6: Hardening and Release
-- [ ] Regression suites (geometry, determinism, CAM snapshots)
-- [ ] Crash reporting + structured logs
-- [ ] Performance budgets and profiling passes
-- [ ] Linux/Windows release pipeline hardening
+- [x] Regression suites (geometry, determinism, CAM snapshots)
+- [x] Crash reporting + structured logs
+- [x] Performance budgets and profiling passes
+- [x] Linux/Windows release pipeline hardening
 
 ## Working Rules
 - [ ] No schema changes without migration code

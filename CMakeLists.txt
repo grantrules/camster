@@ -13,6 +13,7 @@ endif()
 
 find_package(Vulkan REQUIRED)
 include(FetchContent)
+include(CTest)
 
 if(UNIX AND NOT APPLE AND NOT WIN32)
   set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "Disable Wayland backend" FORCE)
@@ -58,6 +59,7 @@ set(CAMSTER_SOURCES
   src/main.cpp
   src/AppSettings.cpp
   src/cam/Cam.cpp
+  src/core/StructuredLog.cpp
   src/dfm/Dfm.cpp
   src/drawing/Drawing.cpp
   src/interop/Step.cpp
@@ -147,3 +149,31 @@ install(FILES
 target_compile_definitions(camster PRIVATE
   CAMSTER_SHADER_DIR="${SHADER_OUTPUT_DIR}"
 )
+
+if(BUILD_TESTING)
+  add_executable(camster_regression_suite
+    tests/regression_suite.cpp
+    src/StlMesh.cpp
+    src/sketch/Extrude.cpp
+    src/sketch/Sketch.cpp
+    src/cam/Cam.cpp
+    src/dfm/Dfm.cpp
+    src/drawing/Drawing.cpp
+    src/interop/Step.cpp
+  )
+  target_include_directories(camster_regression_suite PRIVATE src)
+  target_link_libraries(camster_regression_suite PRIVATE glm)
+
+  add_executable(camster_perf_bench
+    tests/perf_bench.cpp
+    src/StlMesh.cpp
+    src/sketch/Extrude.cpp
+    src/sketch/Sketch.cpp
+    src/cam/Cam.cpp
+  )
+  target_include_directories(camster_perf_bench PRIVATE src)
+  target_link_libraries(camster_perf_bench PRIVATE glm)
+
+  add_test(NAME regression_suite COMMAND camster_regression_suite)
+  add_test(NAME perf_bench COMMAND camster_perf_bench)
+endif()

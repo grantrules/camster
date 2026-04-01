@@ -169,6 +169,9 @@ struct OperationPerformanceStats {
   float chamferMs = 0.0f;
   float filletMs = 0.0f;
   float shellMs = 0.0f;
+  float frameMs = 0.0f;
+  float frameBudgetMs = 16.7f;
+  bool frameBudgetExceeded = false;
 };
 
 // Main application state
