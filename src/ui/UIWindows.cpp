@@ -1,6 +1,7 @@
 #include "ui/UIWindows.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <cstdio>
 #include <cmath>
@@ -13,10 +14,18 @@
 
 #include "Units.hpp"
 #include "core/AppLogic.hpp"
+#include "dfm/Dfm.hpp"
+#include "drawing/Drawing.hpp"
+#include "interop/Step.hpp"
 #include "sketch/Extrude.hpp"
 #include "sketch/Profile.hpp"
 
 namespace {
+template <size_t N>
+void setName(std::array<char, N>& dest, const std::string& value) {
+  std::snprintf(dest.data(), dest.size(), "%s", value.c_str());
+}
+
 void drawObjectSelectionList(const char* title, std::vector<int>& indices,
                              ObjectPickMode modeForSelect, AppState* app) {
   sanitizeObjectIndices(indices, static_cast<int>(app->sceneObjects.size()));
@@ -297,6 +306,54 @@ float uiTopBarHeight() {
   return ImGui::GetFrameHeight() * 2.0f + 8.0f;
 }
 
+void syncCamBuilderSources(AppState* app) {
+  if (app->camBuilder.sourceObject < 0 ||
+      app->camBuilder.sourceObject >= static_cast<int>(app->sceneObjects.size())) {
+    app->camBuilder.sourceObject = app->selectedObject;
+  }
+  if (app->camBuilder.sourceSketch < 0 ||
+      app->camBuilder.sourceSketch >= static_cast<int>(app->sketches.size())) {
+    app->camBuilder.sourceSketch = app->browserSelectedSketches.empty()
+                                       ? -1
+                                       : app->browserSelectedSketches.front();
+  }
+  if (app->camBuilder.toolIndex < 0 ||
+      app->camBuilder.toolIndex >= static_cast<int>(app->camTools.size())) {
+    app->camBuilder.toolIndex = app->camTools.empty() ? -1 : 0;
+  }
+}
+
+void setCamTopFromStock(AppState* app) {
+  app->camBuilder.topZMm = app->camStock.originMm.z + app->camStock.sizeMm.z;
+}
+
+void setCamTopFromSource(AppState* app) {
+  if (app->camBuilder.sourceSketch >= 0 &&
+      app->camBuilder.sourceSketch < static_cast<int>(app->sketches.size())) {
+    app->camBuilder.topZMm = app->sketches[app->camBuilder.sourceSketch].offsetMm;
+    return;
+  }
+  if (app->camBuilder.sourceObject >= 0 &&
+      app->camBuilder.sourceObject < static_cast<int>(app->sceneObjects.size())) {
+    const auto& mesh = app->sceneObjects[app->camBuilder.sourceObject];
+    const auto& verts = mesh.vertices();
+    if (!verts.empty()) {
+      float maxZ = verts.front().position.z;
+      for (const auto& vertex : verts) maxZ = std::max(maxZ, vertex.position.z);
+      app->camBuilder.topZMm = maxZ;
+    }
+  }
+}
+
+void duplicateCamTool(AppState* app, int toolIndex) {
+  if (toolIndex < 0 || toolIndex >= static_cast<int>(app->camTools.size())) return;
+  CamToolPreset tool = app->camTools[toolIndex];
+  std::string name = tool.name.data();
+  setName(tool.name, name + " Copy");
+  app->camTools.push_back(tool);
+  app->camBuilder.toolIndex = static_cast<int>(app->camTools.size()) - 1;
+}
+
 }  // namespace
 
 void drawMenuBar(AppState* app) {
@@ -317,16 +374,49 @@ void drawMenuBar(AppState* app) {
       app->planeCreate = {};
       app->partialSelectedObject = -1;
       app->project.initFromAppSettings(app->appSettings);
+      resetCamSession(app->camBuilder, app->camOperations, -1, -1, app->camStock);
+      app->camSelectedOperation = -1;
+      app->drawingSheet = {};
+      app->dfmReport = {};
+      app->dfmHasReport = false;
       app->status = "New scene";
     }
     if (ImGui::MenuItem("Open STL...")) {
       if (!app->loadingMesh && !app->fileBrowser.isVisible()) {
+        app->importIntent = ImportIntent::Stl;
         app->fileBrowser.show({{"STL Files", {".stl"}}}, {}, "Open File", "Open");
+      }
+    }
+    if (ImGui::MenuItem("Open STEP...")) {
+      if (!app->loadingMesh && !app->fileBrowser.isVisible()) {
+        app->importIntent = ImportIntent::Step;
+        app->fileBrowser.show({{"STEP Files", {".step", ".stp"}}}, {}, "Open STEP", "Open");
       }
     }
     if (ImGui::MenuItem("Export STL...", nullptr, false, app->selectedObject >= 0)) {
       if (!app->exportBrowser.isVisible()) {
+        app->exportIntent = ExportIntent::Stl;
         app->exportBrowser.show({{"STL Files", {".stl"}}}, {}, "Export STL", "Export");
+      }
+    }
+    if (ImGui::MenuItem("Export STEP...", nullptr, false, app->selectedObject >= 0)) {
+      if (!app->exportBrowser.isVisible()) {
+        app->exportIntent = ExportIntent::Step;
+        app->exportBrowser.show({{"STEP Files", {".step", ".stp"}}}, {}, "Export STEP", "Export");
+      }
+    }
+    if (ImGui::MenuItem("Export Drawing PDF...", nullptr, false,
+                        !app->drawingSheet.views.empty())) {
+      if (!app->exportBrowser.isVisible()) {
+        app->exportIntent = ExportIntent::Pdf;
+        app->exportBrowser.show({{"PDF Files", {".pdf"}}}, {}, "Export PDF", "Export");
+      }
+    }
+    if (ImGui::MenuItem("Export Drawing DXF...", nullptr, false,
+                        !app->drawingSheet.views.empty())) {
+      if (!app->exportBrowser.isVisible()) {
+        app->exportIntent = ExportIntent::Dxf;
+        app->exportBrowser.show({{"DXF Files", {".dxf"}}}, {}, "Export DXF", "Export");
       }
     }
     ImGui::Separator();
@@ -417,6 +507,33 @@ void drawMenuBar(AppState* app) {
     if (ImGui::MenuItem("Create Reference Axis", nullptr, false, canReference)) {
       createReferenceAxisFromSelection(app);
       app->status = "Reference axis created";
+    }
+    if (ImGui::MenuItem("Drawings...", nullptr, false,
+                        app->sceneMode == SceneMode::View3D && !app->sceneObjects.empty())) {
+      app->showDrawingWindow = true;
+      app->drawingSourceObject = app->selectedObject >= 0 ? app->selectedObject : 0;
+      app->status = "Drawing workspace opened";
+    }
+    if (ImGui::MenuItem("DFM Checks...", nullptr, false,
+                        app->sceneMode == SceneMode::View3D && !app->sceneObjects.empty())) {
+      app->showDfmWindow = true;
+      app->dfmSourceObject = app->selectedObject >= 0 ? app->selectedObject : 0;
+      app->status = "DFM checks opened";
+    }
+    ImGui::EndMenu();
+  }
+
+  if (ImGui::BeginMenu("CAM")) {
+    if (ImGui::MenuItem("Manufacture...", nullptr, false, app->sceneMode == SceneMode::View3D)) {
+      app->showCamWindow = true;
+      syncCamBuilderSources(app);
+    }
+    if (ImGui::MenuItem("Export Toolpath...", nullptr, false, !app->camOperations.empty())) {
+      if (!app->exportBrowser.isVisible()) {
+        app->exportIntent = ExportIntent::Gcode;
+        app->exportBrowser.show({{"NC Files", {".nc", ".gcode"}}}, {},
+                                "Export Toolpath", "Export");
+      }
     }
     ImGui::EndMenu();
   }
@@ -596,6 +713,27 @@ void drawSolidToolbar(AppState* app) {
     app->status = "Shell tool opened";
   }
   if (!hasSelectedObject) ImGui::EndDisabled();
+
+  ImGui::SameLine();
+  if (ImGui::Button("CAM")) {
+    app->showCamWindow = true;
+    syncCamBuilderSources(app);
+    app->status = "CAM workspace opened";
+  }
+
+  ImGui::SameLine();
+  if (ImGui::Button("Drawings") && !app->sceneObjects.empty()) {
+    app->showDrawingWindow = true;
+    app->drawingSourceObject = app->selectedObject >= 0 ? app->selectedObject : 0;
+    app->status = "Drawing workspace opened";
+  }
+
+  ImGui::SameLine();
+  if (ImGui::Button("DFM") && !app->sceneObjects.empty()) {
+    app->showDfmWindow = true;
+    app->dfmSourceObject = app->selectedObject >= 0 ? app->selectedObject : 0;
+    app->status = "DFM checks opened";
+  }
 
   ImGui::SameLine();
   ImGui::TextDisabled("3D Solid Tools");
@@ -917,6 +1055,23 @@ void drawPanel(AppState* app) {
 
   ImGui::Separator();
 
+  if (!app->lastFeatureFailure.code.empty()) {
+    ImGui::TextColored(ImVec4(0.95f, 0.45f, 0.25f, 1.0f),
+                       "Last Feature Failure [%s]", app->lastFeatureFailure.code.c_str());
+    ImGui::TextWrapped("%s", app->lastFeatureFailure.message.c_str());
+  }
+
+  ImGui::TextDisabled("Perf (ms): combine %.2f | chamfer %.2f | fillet %.2f | shell %.2f",
+                      app->opPerf.combineMs, app->opPerf.chamferMs,
+                      app->opPerf.filletMs, app->opPerf.shellMs);
+  if (app->opPerf.combineMs > 50.0f || app->opPerf.chamferMs > 40.0f ||
+      app->opPerf.filletMs > 60.0f || app->opPerf.shellMs > 80.0f) {
+    ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.25f, 1.0f),
+                       "Perf regression threshold exceeded");
+  }
+
+  ImGui::Separator();
+
   ImGui::TextWrapped("Validation: %s", app->renderer.validationEnabled() ? "ON" : "OFF");
   ImGui::TextWrapped("Wireframe Support: %s", app->renderer.wireframeSupported() ? "YES" : "NO");
   ImGui::TextWrapped("Wireframe: %s", app->renderer.wireframeEnabled() ? "ON" : "OFF");
@@ -1163,6 +1318,9 @@ void drawObjectBrowserWindow(AppState* app) {
 
         ImGui::TableSetColumnIndex(2);
         std::string label = meta.name.data();
+        if (isPlaneReferenceBroken(app, i)) {
+          label += " [BROKEN]";
+        }
         const char* state = browserRowLabel(meta.visible, meta.locked);
         if (state[0] != '\0') {
           label += " ";
@@ -1895,6 +2053,7 @@ void drawRevolveWindow(AppState* app) {
     ImGui::Combo("Source Sketch", &idx, names.data(), static_cast<int>(names.size()));
     app->revolveOptions.sourceSketch = idx;
     ImGui::Combo("Axis", &app->revolveOptions.axisMode, "Sketch X\0Sketch Y\0");
+    ImGui::Checkbox("Replace Selected Object", &app->revolveOptions.replaceSelectedObject);
     ImGui::InputText("Angle", app->revolveOptions.angleBuffer, sizeof(app->revolveOptions.angleBuffer));
     if (ImGui::Button("Apply Revolve")) {
       char* endPtr = nullptr;
@@ -1902,9 +2061,27 @@ void drawRevolveWindow(AppState* app) {
       const auto& sk = app->sketches[idx];
       StlMesh mesh = revolveMesh(sk.sketch.closedProfiles(), sk.plane, sk.offsetMm,
                                  app->revolveOptions.axisMode, angle);
-      if (endPtr == app->revolveOptions.angleBuffer || mesh.empty() || !applyAddExtrude(app, mesh, {})) {
+      const StlMesh verifyMesh = revolveMesh(sk.sketch.closedProfiles(), sk.plane, sk.offsetMm,
+                                             app->revolveOptions.axisMode, angle);
+      if (endPtr == app->revolveOptions.angleBuffer || mesh.empty()) {
+        app->lastFeatureFailure = {"INVALID_INPUT", "Revolve requires valid angle and closed profiles", -1, idx};
+        app->status = "Revolve failed";
+      } else if (meshDeterminismHash(mesh) != meshDeterminismHash(verifyMesh)) {
+        app->lastFeatureFailure = {"NON_DETERMINISTIC", "Revolve generated non-deterministic mesh output", -1, idx};
+        app->status = "Revolve failed: non-deterministic output";
+      } else if (app->revolveOptions.replaceSelectedObject && app->selectedObject >= 0) {
+        if (!replaceSceneObjectMesh(app, app->selectedObject, mesh, "(Revolve)")) {
+          app->status = "Revolve failed to replace selected object";
+        } else {
+          app->lastFeatureFailure = {};
+          app->status = "Revolve updated selected object";
+          app->revolveOptions.visible = false;
+        }
+      } else if (!applyAddExtrude(app, mesh, {})) {
+        app->lastFeatureFailure = {"BOOLEAN_FAILED", "Revolve result could not be added to scene", -1, idx};
         app->status = "Revolve failed";
       } else {
+        app->lastFeatureFailure = {};
         SolidFeatureAction action;
         action.featureName = "Revolve";
         action.sourceNames = {std::string(sk.meta.name.data())};
@@ -1936,15 +2113,35 @@ void drawSweepWindow(AppState* app) {
     ImGui::Combo("Source Sketch", &idx, names.data(), static_cast<int>(names.size()));
     app->sweepOptions.sourceSketch = idx;
     ImGui::Combo("Direction", &app->sweepOptions.axisMode, "World X\0World Y\0World Z\0");
+    ImGui::Checkbox("Replace Selected Object", &app->sweepOptions.replaceSelectedObject);
     ImGui::InputText("Distance", app->sweepOptions.distanceBuffer, sizeof(app->sweepOptions.distanceBuffer));
     if (ImGui::Button("Apply Sweep")) {
       auto parsed = parseDimension(std::string(app->sweepOptions.distanceBuffer), app->project.defaultUnit);
       const auto& sk = app->sketches[idx];
       StlMesh mesh = parsed ? sweepMesh(sk.sketch.closedProfiles(), sk.plane, sk.offsetMm,
                                         app->sweepOptions.axisMode, parsed->valueMm) : StlMesh();
-      if (mesh.empty() || !applyAddExtrude(app, mesh, {})) {
+      const StlMesh verifyMesh = parsed ? sweepMesh(sk.sketch.closedProfiles(), sk.plane, sk.offsetMm,
+                                                    app->sweepOptions.axisMode, parsed->valueMm)
+                                        : StlMesh();
+      if (!parsed || mesh.empty()) {
+        app->lastFeatureFailure = {"INVALID_INPUT", "Sweep requires valid distance and closed profiles", -1, idx};
+        app->status = "Sweep failed";
+      } else if (meshDeterminismHash(mesh) != meshDeterminismHash(verifyMesh)) {
+        app->lastFeatureFailure = {"NON_DETERMINISTIC", "Sweep generated non-deterministic mesh output", -1, idx};
+        app->status = "Sweep failed: non-deterministic output";
+      } else if (app->sweepOptions.replaceSelectedObject && app->selectedObject >= 0) {
+        if (!replaceSceneObjectMesh(app, app->selectedObject, mesh, "(Sweep)")) {
+          app->status = "Sweep failed to replace selected object";
+        } else {
+          app->lastFeatureFailure = {};
+          app->status = "Sweep updated selected object";
+          app->sweepOptions.visible = false;
+        }
+      } else if (!applyAddExtrude(app, mesh, {})) {
+        app->lastFeatureFailure = {"BOOLEAN_FAILED", "Sweep result could not be added to scene", -1, idx};
         app->status = "Sweep failed";
       } else {
+        app->lastFeatureFailure = {};
         SolidFeatureAction action;
         action.featureName = "Sweep";
         action.sourceNames = {std::string(sk.meta.name.data())};
@@ -1977,6 +2174,7 @@ void drawLoftWindow(AppState* app) {
                        std::max(0, static_cast<int>(app->sketches.size()) - 1));
     ImGui::Combo("Source Sketch A", &a, names.data(), static_cast<int>(names.size()));
     ImGui::Combo("Source Sketch B", &b, names.data(), static_cast<int>(names.size()));
+    ImGui::Checkbox("Replace Selected Object", &app->loftOptions.replaceSelectedObject);
     app->loftOptions.sourceSketchA = a;
     app->loftOptions.sourceSketchB = b;
     if (ImGui::Button("Apply Loft")) {
@@ -1984,9 +2182,27 @@ void drawLoftWindow(AppState* app) {
       const auto& skB = app->sketches[b];
       StlMesh mesh = loftMesh(skA.sketch.closedProfiles(), skA.plane, skA.offsetMm,
                               skB.sketch.closedProfiles(), skB.plane, skB.offsetMm);
-      if (a == b || mesh.empty() || !applyAddExtrude(app, mesh, {})) {
+      const StlMesh verifyMesh = loftMesh(skA.sketch.closedProfiles(), skA.plane, skA.offsetMm,
+                                          skB.sketch.closedProfiles(), skB.plane, skB.offsetMm);
+      if (a == b || mesh.empty()) {
+        app->lastFeatureFailure = {"INVALID_INPUT", "Loft needs two distinct sketches with closed profiles", -1, a};
+        app->status = "Loft failed";
+      } else if (meshDeterminismHash(mesh) != meshDeterminismHash(verifyMesh)) {
+        app->lastFeatureFailure = {"NON_DETERMINISTIC", "Loft generated non-deterministic mesh output", -1, a};
+        app->status = "Loft failed: non-deterministic output";
+      } else if (app->loftOptions.replaceSelectedObject && app->selectedObject >= 0) {
+        if (!replaceSceneObjectMesh(app, app->selectedObject, mesh, "(Loft)")) {
+          app->status = "Loft failed to replace selected object";
+        } else {
+          app->lastFeatureFailure = {};
+          app->status = "Loft updated selected object";
+          app->loftOptions.visible = false;
+        }
+      } else if (!applyAddExtrude(app, mesh, {})) {
+        app->lastFeatureFailure = {"BOOLEAN_FAILED", "Loft result could not be added to scene", -1, a};
         app->status = "Loft failed";
       } else {
+        app->lastFeatureFailure = {};
         SolidFeatureAction action;
         action.featureName = "Loft";
         action.sourceNames = {std::string(skA.meta.name.data()), std::string(skB.meta.name.data())};
@@ -2015,21 +2231,37 @@ void drawShellWindow(AppState* app) {
     ImGui::InputText("Thickness", app->shellOptions.thicknessBuffer,
                      sizeof(app->shellOptions.thicknessBuffer));
     if (ImGui::Button("Apply Shell")) {
+      const auto perfStart = std::chrono::steady_clock::now();
       auto parsed = parseDimension(std::string(app->shellOptions.thicknessBuffer), app->project.defaultUnit);
       StlMesh mesh = parsed && app->shellOptions.targetObject >= 0 &&
                              app->shellOptions.targetObject < static_cast<int>(app->sceneObjects.size())
                          ? shellMesh(app->sceneObjects[app->shellOptions.targetObject], parsed->valueMm)
                          : StlMesh();
-      if (mesh.empty() || !applyAddExtrude(app, mesh, {})) {
+      const StlMesh verifyMesh = parsed && app->shellOptions.targetObject >= 0 &&
+                                     app->shellOptions.targetObject < static_cast<int>(app->sceneObjects.size())
+                                 ? shellMesh(app->sceneObjects[app->shellOptions.targetObject], parsed->valueMm)
+                                 : StlMesh();
+      if (!parsed || mesh.empty()) {
+        app->lastFeatureFailure = {"INVALID_INPUT", "Shell requires valid thickness and target object", app->shellOptions.targetObject, -1};
+        app->status = "Shell failed";
+      } else if (meshDeterminismHash(mesh) != meshDeterminismHash(verifyMesh)) {
+        app->lastFeatureFailure = {"NON_DETERMINISTIC", "Shell generated non-deterministic mesh output", app->shellOptions.targetObject, -1};
+        app->status = "Shell failed: non-deterministic output";
+      } else if (!replaceSceneObjectMesh(app, app->shellOptions.targetObject, mesh, "(Shell)")) {
+        app->lastFeatureFailure = {"TOPOLOGY_INVALID", "Shell result failed topology validation", app->shellOptions.targetObject, -1};
         app->status = "Shell failed";
       } else {
+        const auto perfEnd = std::chrono::steady_clock::now();
+        app->opPerf.shellMs =
+            std::chrono::duration<float, std::milli>(perfEnd - perfStart).count();
+        app->lastFeatureFailure = {};
         SolidFeatureAction action;
         action.featureName = "Shell";
         action.sourceNames = {objectName(app, app->shellOptions.targetObject)};
-        action.resultObjectName = objectName(app, static_cast<int>(app->sceneObjects.size()) - 1);
+        action.resultObjectName = objectName(app, app->shellOptions.targetObject);
         app->timeline.push(std::move(action), "Shell");
         app->timelineCursor = app->timeline.size() - 1;
-        app->status = "Shell complete";
+        app->status = "Shell complete (updated selected object)";
         app->shellOptions.visible = false;
       }
     }
@@ -2062,8 +2294,8 @@ void drawCombineWindow(AppState* app) {
                             ObjectPickMode::CombineTools, app);
 
     ImGui::Separator();
-    ImGui::TextDisabled("Subtract/Intersect use object-overlap fallback");
-    ImGui::TextDisabled("(AABB-based approximation)");
+    ImGui::TextDisabled("Boolean ops use AABB overlap/coplanar fallback");
+    ImGui::TextDisabled("(requires touching/overlapping target+tool bounds)");
 
     ImGui::Separator();
     if (ImGui::Button("Apply")) {
@@ -2091,8 +2323,10 @@ void drawCombineWindow(AppState* app) {
         if (!applySubtractCombine(app, app->combineOptions.targets,
                                   app->combineOptions.tools,
                                   app->combineOptions.keepTools)) {
+          app->lastFeatureFailure = {"NO_EFFECT", "Subtract had no overlapping/coplanar targets to remove", -1, -1};
           app->status = "Combine subtract removed no target objects";
         } else {
+          app->lastFeatureFailure = {};
           recordCombine();
           app->status = "Combine subtract complete (object-level)";
         }
@@ -2100,16 +2334,20 @@ void drawCombineWindow(AppState* app) {
         if (!applyIntersectCombine(app, app->combineOptions.targets,
                                    app->combineOptions.tools,
                                    app->combineOptions.keepTools)) {
+          app->lastFeatureFailure = {"NO_OVERLAP", "Intersect found no touching/overlapping target-tool pairs", -1, -1};
           app->status = "Combine intersect found no overlapping objects";
         } else {
+          app->lastFeatureFailure = {};
           recordCombine();
           app->status = "Combine intersect complete (AABB fallback)";
         }
       } else if (!applyAddCombine(app, app->combineOptions.targets,
                                   app->combineOptions.tools,
                                   app->combineOptions.keepTools)) {
-        app->status = "Combine add requires at least one target and one tool";
+        app->lastFeatureFailure = {"NO_CONTACT", "Add combine requires touching/overlapping target and tool bounds", -1, -1};
+        app->status = "Combine add needs at least one touching/overlapping target and tool";
       } else {
+        app->lastFeatureFailure = {};
         recordCombine();
         app->status = "Combine add complete";
       }
@@ -2348,4 +2586,379 @@ void drawDraftWindow(AppState* app) {
   }
   ImGui::End();
   app->draftOptions.visible = open;
+}
+
+void drawCamWindow(AppState* app) {
+  if (!app->showCamWindow) return;
+
+  syncCamBuilderSources(app);
+
+  ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                          ImVec2(0.5f, 0.5f));
+  ImGui::SetNextWindowSize(ImVec2(860.0f, 680.0f), ImGuiCond_FirstUseEver);
+  if (!ImGui::Begin("Manufacture", &app->showCamWindow)) {
+    ImGui::End();
+    return;
+  }
+
+  if (ImGui::BeginTable("##camLayout", 2,
+                        ImGuiTableFlags_SizingStretchProp |
+                            ImGuiTableFlags_BordersInnerV)) {
+    ImGui::TableSetupColumn("Setup", ImGuiTableColumnFlags_WidthStretch, 0.52f);
+    ImGui::TableSetupColumn("Operations", ImGuiTableColumnFlags_WidthStretch, 0.48f);
+    ImGui::TableNextColumn();
+
+    ImGui::TextUnformatted("Stock / WCS");
+    ImGui::DragFloat3("Stock Origin", &app->camStock.originMm.x, 1.0f);
+    ImGui::DragFloat3("Stock Size", &app->camStock.sizeMm.x, 1.0f, 1.0f, 10000.0f);
+    ImGui::DragFloat3("WCS Offset", &app->camStock.wcsOffsetMm.x, 1.0f);
+    ImGui::DragFloat("Safe Retract", &app->camStock.safeRetractMm, 0.25f, 1.0f, 500.0f);
+    if (ImGui::Button("Use Stock Top for WCS Z")) {
+      app->camStock.wcsOffsetMm.z = app->camStock.sizeMm.z;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Reset CAM Session")) {
+      resetCamSession(app->camBuilder, app->camOperations, app->selectedObject,
+                      app->browserSelectedSketches.empty() ? -1 : app->browserSelectedSketches.front(),
+                      app->camStock);
+      app->camSelectedOperation = -1;
+      app->status = "CAM session reset";
+    }
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Tool Library");
+    if (ImGui::BeginListBox("##camTools", ImVec2(-1.0f, 130.0f))) {
+      for (int i = 0; i < static_cast<int>(app->camTools.size()); ++i) {
+        const bool selected = i == app->camBuilder.toolIndex;
+        const std::string label = std::to_string(i + 1) + ". " + app->camTools[i].name.data();
+        if (ImGui::Selectable(label.c_str(), selected)) {
+          app->camBuilder.toolIndex = i;
+        }
+      }
+      ImGui::EndListBox();
+    }
+
+    if (ImGui::Button("Add Tool")) {
+      CamToolPreset tool;
+      setName(tool.name, "New Tool");
+      app->camTools.push_back(tool);
+      app->camBuilder.toolIndex = static_cast<int>(app->camTools.size()) - 1;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Duplicate") && app->camBuilder.toolIndex >= 0) {
+      duplicateCamTool(app, app->camBuilder.toolIndex);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Delete") && app->camBuilder.toolIndex >= 0 &&
+        app->camTools.size() > 1) {
+      app->camTools.erase(app->camTools.begin() + app->camBuilder.toolIndex);
+      app->camBuilder.toolIndex = std::clamp(app->camBuilder.toolIndex - 1, 0,
+                                             static_cast<int>(app->camTools.size()) - 1);
+    }
+
+    if (app->camBuilder.toolIndex >= 0 &&
+        app->camBuilder.toolIndex < static_cast<int>(app->camTools.size())) {
+      auto& tool = app->camTools[app->camBuilder.toolIndex];
+      ImGui::InputText("Tool Name", tool.name.data(), tool.name.size());
+      int toolType = static_cast<int>(tool.type);
+      if (ImGui::Combo("Tool Type", &toolType, "Flat End Mill\0Ball End Mill\0Drill\0")) {
+        tool.type = static_cast<CamToolType>(toolType);
+      }
+      ImGui::DragFloat("Diameter", &tool.diameterMm, 0.1f, 0.1f, 100.0f);
+      ImGui::DragFloat("Feed", &tool.feedRateMmPerMin, 10.0f, 10.0f, 30000.0f);
+      ImGui::DragFloat("Plunge", &tool.plungeRateMmPerMin, 10.0f, 10.0f, 10000.0f);
+      ImGui::DragFloat("Spindle", &tool.spindleRpm, 100.0f, 100.0f, 60000.0f);
+      ImGui::DragFloat("Max Stepdown", &tool.maxStepDownMm, 0.05f, 0.05f, 50.0f);
+      ImGui::DragFloat("Default Stepover", &tool.stepover, 0.01f, 0.05f, 1.0f);
+    }
+
+    ImGui::TableNextColumn();
+    ImGui::TextUnformatted("Operation Builder");
+    int opType = static_cast<int>(app->camBuilder.type);
+    if (ImGui::Combo("Operation", &opType, "Facing\0Pocket\0Contour\0Drilling\0")) {
+      app->camBuilder.type = static_cast<CamOperationType>(opType);
+    }
+
+    std::vector<const char*> objectNames;
+    objectNames.push_back("None");
+    for (const auto& meta : app->sceneObjectMeta) objectNames.push_back(meta.name.data());
+    int objectIndex = app->camBuilder.sourceObject + 1;
+    if (ImGui::Combo("Source Object", &objectIndex, objectNames.data(),
+                     static_cast<int>(objectNames.size()))) {
+      app->camBuilder.sourceObject = objectIndex - 1;
+    }
+
+    std::vector<const char*> sketchNames;
+    sketchNames.push_back("None");
+    for (const auto& sketch : app->sketches) sketchNames.push_back(sketch.meta.name.data());
+    int sketchIndex = app->camBuilder.sourceSketch + 1;
+    if (ImGui::Combo("Source Sketch", &sketchIndex, sketchNames.data(),
+                     static_cast<int>(sketchNames.size()))) {
+      app->camBuilder.sourceSketch = sketchIndex - 1;
+    }
+
+    if (ImGui::Button("Top From Stock")) {
+      setCamTopFromStock(app);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Top From Source")) {
+      setCamTopFromSource(app);
+    }
+
+    ImGui::DragFloat("Top Z", &app->camBuilder.topZMm, 0.25f);
+    ImGui::DragFloat("Depth", &app->camBuilder.depthMm, 0.25f, 0.05f, 500.0f);
+    ImGui::DragFloat("Step Down", &app->camBuilder.stepDownMm, 0.1f, 0.05f, 100.0f);
+    ImGui::DragFloat("Stepover %", &app->camBuilder.stepoverPercent, 1.0f, 5.0f, 95.0f);
+    ImGui::DragFloat("Clearance", &app->camBuilder.clearanceMm, 0.25f, 1.0f, 500.0f);
+
+    if (ImGui::Button("Queue Operation", ImVec2(-1.0f, 0.0f))) {
+      CamOperation operation;
+      std::string error;
+      if (!generateCamOperation(app->camBuilder, app->camTools, app->camStock,
+                                app->sceneObjects, app->sketches, app->referencePoints,
+                                operation, error)) {
+        app->status = "CAM: " + error;
+      } else {
+        const int opNumber = static_cast<int>(app->camOperations.size()) + 1;
+        operation.name = std::string(camOperationTypeLabel(operation.type)) +
+                         " Op " + std::to_string(opNumber);
+        app->camOperations.push_back(std::move(operation));
+        app->camSelectedOperation = static_cast<int>(app->camOperations.size()) - 1;
+        app->timeline.push(ReferenceGeometryAction{"CAM", app->camOperations.back().name},
+                           app->camOperations.back().name);
+        app->timelineCursor = app->timeline.size() - 1;
+        app->status = "CAM operation queued";
+      }
+    }
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Queued Operations");
+    float totalMinutes = 0.0f;
+    for (const auto& operation : app->camOperations) totalMinutes += operation.estimatedMinutes;
+    ImGui::Text("Ops: %d", static_cast<int>(app->camOperations.size()));
+    ImGui::Text("Estimated Time: %.2f min", totalMinutes);
+    ImGui::Text("Post: %s", camPostProcessorLabel(app->camPostProcessor));
+
+    if (ImGui::BeginListBox("##camOps", ImVec2(-1.0f, 180.0f))) {
+      for (int i = 0; i < static_cast<int>(app->camOperations.size()); ++i) {
+        const auto& operation = app->camOperations[i];
+        std::string label = operation.name;
+        bool severe = false;
+        for (const auto& warning : operation.warnings) severe = severe || warning.severe;
+        if (severe) label += " [warn]";
+        if (ImGui::Selectable(label.c_str(), i == app->camSelectedOperation)) {
+          app->camSelectedOperation = i;
+        }
+      }
+      ImGui::EndListBox();
+    }
+
+    if (ImGui::Button("Remove Selected") && app->camSelectedOperation >= 0 &&
+        app->camSelectedOperation < static_cast<int>(app->camOperations.size())) {
+      app->camOperations.erase(app->camOperations.begin() + app->camSelectedOperation);
+      app->camSelectedOperation = std::min(app->camSelectedOperation,
+                                           static_cast<int>(app->camOperations.size()) - 1);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Clear All") && !app->camOperations.empty()) {
+      app->camOperations.clear();
+      app->camSelectedOperation = -1;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Export G-code") && !app->camOperations.empty() &&
+        !app->exportBrowser.isVisible()) {
+      app->exportIntent = ExportIntent::Gcode;
+      app->exportBrowser.show({{"NC Files", {".nc", ".gcode"}}}, {},
+                              "Export Toolpath", "Export");
+    }
+
+    if (app->camSelectedOperation >= 0 &&
+        app->camSelectedOperation < static_cast<int>(app->camOperations.size())) {
+      const auto& operation = app->camOperations[app->camSelectedOperation];
+      ImGui::Separator();
+      ImGui::Text("Selected: %s", operation.name.c_str());
+      ImGui::Text("Length: %.1f mm", operation.estimatedLengthMm);
+      ImGui::Text("Time: %.2f min", operation.estimatedMinutes);
+      ImGui::Text("Segments: %d", static_cast<int>(operation.segments.size()));
+      ImGui::Text("Warnings: %d", static_cast<int>(operation.warnings.size()));
+      ImGui::BeginChild("##camWarnings", ImVec2(0.0f, 110.0f), true);
+      if (operation.warnings.empty()) {
+        ImGui::TextDisabled("No baseline collision/gouge warnings");
+      } else {
+        for (const auto& warning : operation.warnings) {
+          ImGui::TextColored(warning.severe ? ImVec4(1.0f, 0.4f, 0.2f, 1.0f)
+                                            : ImVec4(0.95f, 0.8f, 0.25f, 1.0f),
+                             "%s", warning.message.c_str());
+        }
+      }
+      ImGui::EndChild();
+    }
+
+    ImGui::EndTable();
+  }
+
+  ImGui::Separator();
+  ImGui::TextDisabled("Preview legend: green=cut, blue=plunge, yellow=rapid, orange=warning, grey=stock, RGB=WCS axes");
+
+  ImGui::End();
+}
+
+void drawDrawingWindow(AppState* app) {
+  if (!app->showDrawingWindow) return;
+
+  if (app->drawingSourceObject < 0 ||
+      app->drawingSourceObject >= static_cast<int>(app->sceneObjects.size())) {
+    app->drawingSourceObject = app->selectedObject >= 0 ? app->selectedObject : 0;
+  }
+
+  bool open = app->showDrawingWindow;
+  ImGui::SetNextWindowSize(ImVec2(560.0f, 520.0f), ImGuiCond_FirstUseEver);
+  if (!ImGui::Begin("Drawings", &open)) {
+    ImGui::End();
+    app->showDrawingWindow = open;
+    return;
+  }
+
+  std::vector<const char*> objectNamesUi;
+  for (const auto& meta : app->sceneObjectMeta) objectNamesUi.push_back(meta.name.data());
+  if (!objectNamesUi.empty()) {
+    int idx = std::clamp(app->drawingSourceObject, 0,
+                         static_cast<int>(objectNamesUi.size()) - 1);
+    ImGui::Combo("Source Object", &idx, objectNamesUi.data(),
+                 static_cast<int>(objectNamesUi.size()));
+    app->drawingSourceObject = idx;
+  }
+
+  ImGui::SliderFloat("Section Ratio", &app->drawingSectionRatio, 0.1f, 0.9f, "%.2f");
+  if (ImGui::Button("Generate Drawing Sheet") &&
+      app->drawingSourceObject >= 0 &&
+      app->drawingSourceObject < static_cast<int>(app->sceneObjects.size())) {
+    std::string err;
+    if (buildDrawingSheet(app->sceneObjects[app->drawingSourceObject],
+                          objectName(app, app->drawingSourceObject),
+                          app->drawingSectionRatio,
+                          app->drawingSheet, err)) {
+      app->drawingSheet.sourceObject = app->drawingSourceObject;
+      app->status = "Drawing sheet generated";
+    } else {
+      app->status = "Drawing failed: " + err;
+    }
+  }
+
+  if (!app->drawingSheet.views.empty()) {
+    ImGui::Separator();
+    ImGui::Text("Title: %s", app->drawingSheet.title.c_str());
+    ImGui::Text("Views: %d", static_cast<int>(app->drawingSheet.views.size()));
+
+    if (ImGui::BeginTable("##drawingViews", 3,
+                          ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+      ImGui::TableSetupColumn("View");
+      ImGui::TableSetupColumn("Width (mm)");
+      ImGui::TableSetupColumn("Height (mm)");
+      ImGui::TableHeadersRow();
+      for (const auto& view : app->drawingSheet.views) {
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        ImGui::TextUnformatted(view.label.c_str());
+        ImGui::TableSetColumnIndex(1);
+        ImGui::Text("%.3f", view.widthMm);
+        ImGui::TableSetColumnIndex(2);
+        ImGui::Text("%.3f", view.heightMm);
+      }
+      ImGui::EndTable();
+    }
+
+    if (ImGui::BeginTable("##drawingDims", 2,
+                          ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
+      ImGui::TableSetupColumn("Dimension");
+      ImGui::TableSetupColumn("Value (mm)");
+      ImGui::TableHeadersRow();
+      for (const auto& dim : app->drawingSheet.dimensions) {
+        ImGui::TableNextRow();
+        ImGui::TableSetColumnIndex(0);
+        ImGui::TextUnformatted(dim.label.c_str());
+        ImGui::TableSetColumnIndex(1);
+        ImGui::Text("%.3f", dim.valueMm);
+      }
+      ImGui::EndTable();
+    }
+
+    if (ImGui::Button("Export PDF") && !app->exportBrowser.isVisible()) {
+      app->exportIntent = ExportIntent::Pdf;
+      app->exportBrowser.show({{"PDF Files", {".pdf"}}}, {}, "Export PDF", "Export");
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Export DXF") && !app->exportBrowser.isVisible()) {
+      app->exportIntent = ExportIntent::Dxf;
+      app->exportBrowser.show({{"DXF Files", {".dxf"}}}, {}, "Export DXF", "Export");
+    }
+  } else {
+    ImGui::TextDisabled("Generate a drawing sheet to enable PDF/DXF export.");
+  }
+
+  ImGui::End();
+  app->showDrawingWindow = open;
+}
+
+void drawDfmWindow(AppState* app) {
+  if (!app->showDfmWindow) return;
+
+  if (app->dfmSourceObject < 0 ||
+      app->dfmSourceObject >= static_cast<int>(app->sceneObjects.size())) {
+    app->dfmSourceObject = app->selectedObject >= 0 ? app->selectedObject : 0;
+  }
+
+  bool open = app->showDfmWindow;
+  ImGui::SetNextWindowSize(ImVec2(520.0f, 460.0f), ImGuiCond_FirstUseEver);
+  if (!ImGui::Begin("DFM Checks", &open)) {
+    ImGui::End();
+    app->showDfmWindow = open;
+    return;
+  }
+
+  std::vector<const char*> objectNamesUi;
+  for (const auto& meta : app->sceneObjectMeta) objectNamesUi.push_back(meta.name.data());
+  if (!objectNamesUi.empty()) {
+    int idx = std::clamp(app->dfmSourceObject, 0,
+                         static_cast<int>(objectNamesUi.size()) - 1);
+    ImGui::Combo("Source Object", &idx, objectNamesUi.data(),
+                 static_cast<int>(objectNamesUi.size()));
+    app->dfmSourceObject = idx;
+  }
+
+  if (ImGui::Button("Run DFM Heuristics") &&
+      app->dfmSourceObject >= 0 &&
+      app->dfmSourceObject < static_cast<int>(app->sceneObjects.size())) {
+    std::string err;
+    if (runDfmChecks(app->sceneObjects[app->dfmSourceObject], app->dfmReport, err)) {
+      app->dfmHasReport = true;
+      app->status = "DFM checks completed";
+    } else {
+      app->dfmHasReport = false;
+      app->status = "DFM checks failed: " + err;
+    }
+  }
+
+  if (app->dfmHasReport) {
+    ImGui::Separator();
+    ImGui::Text("Estimated Min Wall: %.3f mm", app->dfmReport.estimatedMinWallMm);
+    ImGui::Text("Estimated Min Radius: %.3f mm", app->dfmReport.estimatedMinRadiusMm);
+    ImGui::Text("Drillable Features: %d", app->dfmReport.drillableFeatureCount);
+
+    ImGui::Separator();
+    if (app->dfmReport.issues.empty()) {
+      ImGui::TextColored(ImVec4(0.35f, 0.95f, 0.45f, 1.0f), "No DFM issues detected by baseline heuristics");
+    } else {
+      for (const auto& issue : app->dfmReport.issues) {
+        const ImVec4 color = issue.severe ? ImVec4(1.0f, 0.35f, 0.2f, 1.0f)
+                                          : ImVec4(0.95f, 0.78f, 0.2f, 1.0f);
+        ImGui::TextColored(color, "[%s] %s", issue.code.c_str(), issue.message.c_str());
+      }
+    }
+  } else {
+    ImGui::TextDisabled("Run checks to evaluate wall thickness, minimum radius, and drillability.");
+  }
+
+  ImGui::End();
+  app->showDfmWindow = open;
 }

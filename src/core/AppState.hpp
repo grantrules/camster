@@ -15,6 +15,9 @@
 #include "History.hpp"
 #include "Project.hpp"
 #include "ProjectTypes.hpp"
+#include "cam/Cam.hpp"
+#include "dfm/Dfm.hpp"
+#include "drawing/Drawing.hpp"
 #include "Scene.hpp"
 #include "StlMesh.hpp"
 #include "VulkanRenderer.hpp"
@@ -40,6 +43,8 @@ enum class ObjectPickMode {
 };
 enum class BrowserSection { Objects, Planes, Sketches, Axes, Points };
 enum class PlaneReferenceSource { Plane, Face };
+enum class ExportIntent { Stl, Gcode, Pdf, Dxf, Step };
+enum class ImportIntent { Stl, Step };
 
 struct ChamferEdgeSelection {
   int objectIndex = -1;
@@ -89,6 +94,7 @@ struct RevolveOptionsState {
   bool visible = false;
   int sourceSketch = -1;
   int axisMode = 0;
+  bool replaceSelectedObject = false;
   char angleBuffer[64] = {};
 };
 
@@ -96,6 +102,7 @@ struct SweepOptionsState {
   bool visible = false;
   int sourceSketch = -1;
   int axisMode = 2;
+  bool replaceSelectedObject = false;
   char distanceBuffer[64] = {};
 };
 
@@ -103,6 +110,7 @@ struct LoftOptionsState {
   bool visible = false;
   int sourceSketchA = -1;
   int sourceSketchB = -1;
+  bool replaceSelectedObject = false;
 };
 
 struct ShellOptionsState {
@@ -149,6 +157,20 @@ struct ObjectEditSnapshot {
   std::vector<int> browserSelectedPoints;
 };
 
+struct FeatureFailureDiagnostics {
+  std::string code;
+  std::string message;
+  int objectIndex = -1;
+  int sketchIndex = -1;
+};
+
+struct OperationPerformanceStats {
+  float combineMs = 0.0f;
+  float chamferMs = 0.0f;
+  float filletMs = 0.0f;
+  float shellMs = 0.0f;
+};
+
 // Main application state
 struct AppState {
   // 3D Print
@@ -161,6 +183,8 @@ struct AppState {
   StlMesh mesh;       // combined mesh sent to renderer
   FileBrowser fileBrowser;
   FileBrowser exportBrowser;  // separate browser instance for export
+  ExportIntent exportIntent = ExportIntent::Stl;
+  ImportIntent importIntent = ImportIntent::Stl;
 
   // Individual mesh objects for selection / export.
   std::vector<StlMesh> sceneObjects;
@@ -226,9 +250,26 @@ struct AppState {
   int timelineCursor = -1;  // index into timeline entries; -1 means no selection yet
   bool showAppSettings = false;
   bool showProjectSettings = false;
+  bool showDrawingWindow = false;
+  bool showDfmWindow = false;
+  int drawingSourceObject = -1;
+  float drawingSectionRatio = 0.5f;
+  DrawingSheet drawingSheet;
+  DfmReport dfmReport;
+  int dfmSourceObject = -1;
+  bool dfmHasReport = false;
+  bool showCamWindow = false;
+  CamStockSettings camStock;
+  CamOperationBuilderState camBuilder;
+  std::vector<CamToolPreset> camTools;
+  std::vector<CamOperation> camOperations;
+  CamPostProcessor camPostProcessor = CamPostProcessor::Grbl;
+  int camSelectedOperation = -1;
 
   std::vector<ObjectEditSnapshot> objectUndoStack;
   std::vector<ObjectEditSnapshot> objectRedoStack;
+  FeatureFailureDiagnostics lastFeatureFailure;
+  OperationPerformanceStats opPerf;
 
   bool hasActiveSketch() const {
     return activeSketchIndex >= 0 && activeSketchIndex < static_cast<int>(sketches.size());

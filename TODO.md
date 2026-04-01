@@ -19,18 +19,28 @@
 - [x] Fillet/chamfer baseline with reference persistence strategy
 - [x] Robust reference geometry (planes/axes/points)
 
+### M3+ Expansion (Solid Modeling v1 Hardening)
+- [x] Boolean robustness pass: non-overlap handling, coplanar-face edge cases, predictable naming/selection after operations
+- [x] Fillet/chamfer continuity pass: stable edge identity across undo/redo and chained operations
+- [x] Solid feature editability: lightweight parameter edit for draft/shell/revolve/sweep/loft after creation
+- [x] Feature failure diagnostics: user-facing reason codes + highlight failing inputs
+- [x] Reference geometry associativity: keep derived references valid or gracefully mark broken dependencies
+- [x] Topology validation gates: manifold checks and triangle-normal consistency after each solid op
+- [x] Performance pass on large meshes: timed benchmarks for combine/fillet/shell and regression thresholds
+- [x] Timeline replay determinism for solids: same inputs -> byte-stable mesh output checks
+
 ## M4: CAM MVP
-- [ ] 2.5D ops: facing, pocket, contour, drilling
-- [ ] Tool library with feeds/speeds presets
-- [ ] Stock/WCS setup
-- [ ] Toolpath preview + collision/gouge baseline checks
-- [ ] First production post-processor target
+- [x] 2.5D ops: facing, pocket, contour, drilling
+- [x] Tool library with feeds/speeds presets
+- [x] Stock/WCS setup
+- [x] Toolpath preview + collision/gouge baseline checks
+- [x] First production post-processor target
 
 ## M5: Drawings, Interop, DFM
-- [ ] Drawing workspace with key views/sections/dimensions
-- [ ] Export: PDF, DXF
-- [ ] STEP import/export baseline
-- [ ] DFM checks: wall thickness, minimum radius, drillability heuristics
+- [x] Drawing workspace with key views/sections/dimensions
+- [x] Export: PDF, DXF
+- [x] STEP import/export baseline
+- [x] DFM checks: wall thickness, minimum radius, drillability heuristics
 
 ## M6: Hardening and Release
 - [ ] Regression suites (geometry, determinism, CAM snapshots)

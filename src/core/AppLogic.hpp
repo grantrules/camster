@@ -70,6 +70,11 @@ bool objectUndo(AppState* app);
 bool objectRedo(AppState* app);
 
 bool validateDeterministicAppState(const AppState* app, std::string& error);
+bool validateMeshTopology(const StlMesh& mesh, std::string& error);
+uint64_t meshDeterminismHash(const StlMesh& mesh);
+bool replaceSceneObjectMesh(AppState* app, int objectIndex, const StlMesh& mesh,
+                            const std::string& newNameSuffix);
+bool isPlaneReferenceBroken(const AppState* app, int planeIndex);
 
 void rebuildCombinedMesh(AppState* app);
 

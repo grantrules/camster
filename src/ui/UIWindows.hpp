@@ -22,3 +22,6 @@ void drawCombineWindow(AppState* app);
 void drawChamferWindow(AppState* app);
 void drawFilletWindow(AppState* app);
 void drawDraftWindow(AppState* app);
+void drawCamWindow(AppState* app);
+void drawDrawingWindow(AppState* app);
+void drawDfmWindow(AppState* app);

@@ -57,6 +57,10 @@ target_link_libraries(imgui PUBLIC glfw Vulkan::Vulkan)
 set(CAMSTER_SOURCES
   src/main.cpp
   src/AppSettings.cpp
+  src/cam/Cam.cpp
+  src/dfm/Dfm.cpp
+  src/drawing/Drawing.cpp
+  src/interop/Step.cpp
   src/NutFile.cpp
   src/core/AppLogic.cpp
   src/CameraController.cpp

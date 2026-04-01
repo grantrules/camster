@@ -7,6 +7,7 @@
 
 struct ToolbarAction {
   bool exitSketchRequested = false;
+  bool projectToolRequested = false;
   bool extrudeRequested = false;
   bool extrudeConfirmed = false;
   bool deleteRequested = false;
