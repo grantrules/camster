@@ -45,6 +45,7 @@
 #include "ui/Toolbar.hpp"
 #include "ui/PrintWindow.hpp"
 #include "core/AppLogic.hpp"
+#include "core/StructuredLog.hpp"
 #include "ui/UIWindows.hpp"
 #include "core/AppState.hpp"
 
@@ -218,8 +219,14 @@ EdgePickResult pickChamferEdge(const AppState& app, int objectIndex, glm::vec3 r
 }  // namespace
 
 int main() {
+  structured_log::initialize("camster");
+  structured_log::installCrashHandlers();
+  structured_log::info("startup", "camster process started");
+
   if (!glfwInit()) {
     std::cerr << "Failed to initialize GLFW\n";
+    structured_log::error("startup", "Failed to initialize GLFW");
+    structured_log::shutdown();
     return 1;
   }
 
@@ -229,7 +236,9 @@ int main() {
   GLFWwindow* window = glfwCreateWindow(1280, 800, "camster - Vulkan STL Viewer", nullptr, nullptr);
   if (!window) {
     std::cerr << "Failed to create window\n";
+    structured_log::error("startup", "Failed to create GLFW window");
     glfwTerminate();
+    structured_log::shutdown();
     return 1;
   }
 
@@ -242,8 +251,10 @@ int main() {
   std::string error;
   if (!app.renderer.initialize(window, error)) {
     std::cerr << "Renderer initialization failed: " << error << "\n";
+    structured_log::error("renderer_init", error);
     glfwDestroyWindow(window);
     glfwTerminate();
+    structured_log::shutdown();
     return 1;
   }
 
@@ -257,7 +268,24 @@ int main() {
   app.browserSelectedObjects.clear();
   rebuildCombinedMesh(&app);
 
+  auto frameClock = std::chrono::steady_clock::now();
+  int frameOverBudgetCount = 0;
+
   while (!glfwWindowShouldClose(window)) {
+    const auto frameStart = std::chrono::steady_clock::now();
+    app.opPerf.frameMs =
+        std::chrono::duration<float, std::milli>(frameStart - frameClock).count();
+    frameClock = frameStart;
+    app.opPerf.frameBudgetExceeded = app.opPerf.frameMs > app.opPerf.frameBudgetMs;
+    if (app.opPerf.frameBudgetExceeded) {
+      ++frameOverBudgetCount;
+      if (frameOverBudgetCount % 120 == 0) {
+        structured_log::warn("perf_frame_budget",
+                             "Frame budget exceeded at " +
+                                 std::to_string(app.opPerf.frameMs) + " ms");
+      }
+    }
+
     glfwPollEvents();
 
     // Mesh loading runs on a background thread so the UI stays responsive
@@ -270,6 +298,7 @@ int main() {
 
       if (!result.success) {
         app.status = "Open failed: " + result.error;
+        structured_log::error("file_open", result.error);
       } else {
         if (!app.sceneObjects.empty()) {
           pushObjectUndoSnapshot(&app);
@@ -282,6 +311,7 @@ int main() {
         app.camSelectedOperation = -1;
         rebuildCombinedMesh(&app);
         app.status = "Loaded " + result.path;
+        structured_log::info("file_open", "Loaded " + result.path);
       }
     }
 
@@ -1278,6 +1308,7 @@ int main() {
                                 app.camera.projectionMatrix(app.renderer.framebufferAspect()),
                                 ImGui::GetDrawData(), frameError)) {
       std::cerr << "Draw failed: " << frameError << "\n";
+      structured_log::error("draw_frame", frameError);
       break;
     }
   }
@@ -1292,5 +1323,7 @@ int main() {
 
   glfwDestroyWindow(window);
   glfwTerminate();
+  structured_log::info("shutdown", "camster process exiting cleanly");
+  structured_log::shutdown();
   return 0;
 }

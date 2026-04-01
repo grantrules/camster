@@ -13,7 +13,8 @@ docker run --rm \
   -v "$(pwd)":/workspace \
   -w /workspace \
   camster-build-windows:latest \
-  bash -lc "rm -rf /tmp/camster-build-windows dist-windows-docker && cmake -S . -B /tmp/camster-build-windows -G Ninja -DCMAKE_TOOLCHAIN_FILE=/workspace/cmake/toolchains/mingw-w64-x86_64.cmake -DCMAKE_BUILD_TYPE=Release && cmake --build /tmp/camster-build-windows -j\$(nproc) && cmake --install /tmp/camster-build-windows --prefix /workspace/dist-windows-docker --component Runtime && for dll in libstdc++-6.dll libgcc_s_seh-1.dll libwinpthread-1.dll libssp-0.dll libatomic-1.dll; do path=\$(x86_64-w64-mingw32-g++-posix -print-file-name=\$dll); if [ -f \"\$path\" ]; then cp \"\$path\" /workspace/dist-windows-docker/bin/; fi; done && cd /workspace/dist-windows-docker && cmake -E tar cfv camster-windows.zip --format=zip bin"
+  bash -lc "set -euo pipefail && rm -rf /tmp/camster-build-windows dist-windows-docker && cmake -S . -B /tmp/camster-build-windows -G Ninja -DCMAKE_TOOLCHAIN_FILE=/workspace/cmake/toolchains/mingw-w64-x86_64.cmake -DCMAKE_BUILD_TYPE=Release && cmake --build /tmp/camster-build-windows -j\$(nproc) && cmake --install /tmp/camster-build-windows --prefix /workspace/dist-windows-docker --component Runtime && for dll in libstdc++-6.dll libgcc_s_seh-1.dll libwinpthread-1.dll libssp-0.dll libatomic-1.dll; do path=\$(x86_64-w64-mingw32-g++-posix -print-file-name=\$dll); if [ -f \"\$path\" ]; then cp \"\$path\" /workspace/dist-windows-docker/bin/; fi; done && test -f /workspace/dist-windows-docker/bin/camster.exe && cd /workspace/dist-windows-docker && cmake -E tar cfv camster-windows.zip --format=zip bin && sha256sum bin/camster.exe camster-windows.zip > SHA256SUMS.txt"
 
 echo "Portable windows bundle: ./dist-windows-docker/bin/camster.exe"
 echo "Portable windows zip: ./dist-windows-docker/camster-windows.zip"
+echo "Windows checksums: ./dist-windows-docker/SHA256SUMS.txt"

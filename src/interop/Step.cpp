@@ -1,6 +1,7 @@
 #include "interop/Step.hpp"
 
 #include <cctype>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <string>

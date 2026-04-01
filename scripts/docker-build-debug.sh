@@ -13,6 +13,6 @@ docker run --rm \
   -v "$(pwd)":/workspace \
   -w /workspace \
   camster-build:latest \
-  bash -lc "rm -rf /tmp/camster-build-debug dist-debug-docker && cmake -S . -B /tmp/camster-build-debug -G Ninja -DCMAKE_BUILD_TYPE=Debug && cmake --build /tmp/camster-build-debug -j\$(nproc) && cmake --install /tmp/camster-build-debug --prefix /workspace/dist-debug-docker --component Runtime"
+  bash -lc "set -euo pipefail && rm -rf /tmp/camster-build-debug dist-debug-docker && cmake -S . -B /tmp/camster-build-debug -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON && cmake --build /tmp/camster-build-debug -j\$(nproc) && ctest --test-dir /tmp/camster-build-debug --output-on-failure && cmake --install /tmp/camster-build-debug --prefix /workspace/dist-debug-docker --component Runtime"
 
 echo "Portable debug bundle: ./dist-debug-docker/bin/camster"

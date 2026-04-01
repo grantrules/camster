@@ -48,6 +48,8 @@ Build debug:
 ./scripts/docker-build-debug.sh
 ```
 
+This build also runs regression and performance tests through `ctest`.
+
 This writes a portable bundle to:
 
 ```bash
@@ -60,6 +62,12 @@ Build release:
 
 ```bash
 ./scripts/docker-build-release.sh
+```
+
+This build runs `ctest` and emits Linux release checksums:
+
+```bash
+./dist-release-docker/bin/SHA256SUMS.txt
 ```
 
 This writes a portable bundle to:
@@ -94,6 +102,18 @@ Windows cross-build with Docker:
 
 ```bash
 ./scripts/docker-build-windows.sh
+```
+
+This build emits Windows artifact checksums:
+
+```bash
+./dist-windows-docker/SHA256SUMS.txt
+```
+
+Full hardened pipeline gate:
+
+```bash
+./scripts/docker-release-ci.sh
 ```
 
 This writes:
@@ -131,6 +151,8 @@ Phase 1 is focused on opening files with the in-app file browser.
 
 - This implementation uses depth attachments and staging uploads for more production-like rendering behavior.
 - Additional hardening options: validation layers, GPU upload batching, and asynchronous asset streaming.
+- Structured logs are written as JSON lines under `./logs/`.
+- M6 hardening details and acceptance gates are documented in [docs/m6-hardening-release.md](docs/m6-hardening-release.md).
 
 ## Project File Format
 

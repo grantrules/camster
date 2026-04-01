@@ -13,6 +13,7 @@ docker run --rm \
   -v "$(pwd)":/workspace \
   -w /workspace \
   camster-build:latest \
-  bash -lc "rm -rf /tmp/camster-build-release dist-release-docker && cmake -S . -B /tmp/camster-build-release -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build /tmp/camster-build-release -j\$(nproc) && cmake --install /tmp/camster-build-release --prefix /workspace/dist-release-docker --component Runtime"
+  bash -lc "set -euo pipefail && rm -rf /tmp/camster-build-release dist-release-docker && cmake -S . -B /tmp/camster-build-release -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON && cmake --build /tmp/camster-build-release -j\$(nproc) && ctest --test-dir /tmp/camster-build-release --output-on-failure && cmake --install /tmp/camster-build-release --prefix /workspace/dist-release-docker --component Runtime && test -x /workspace/dist-release-docker/bin/camster && sha256sum /workspace/dist-release-docker/bin/camster > /workspace/dist-release-docker/bin/SHA256SUMS.txt"
 
 echo "Portable release bundle: ./dist-release-docker/bin/camster"
+echo "Release checksums: ./dist-release-docker/bin/SHA256SUMS.txt"
