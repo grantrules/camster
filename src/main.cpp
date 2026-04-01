@@ -266,6 +266,9 @@ int main() {
       if (!result.success) {
         app.status = "Open failed: " + result.error;
       } else {
+        if (!app.sceneObjects.empty()) {
+          pushObjectUndoSnapshot(&app);
+        }
         clearSceneObjects(&app);
         appendSceneObject(&app, std::move(result.mesh));
         app.selectedObject = 0;
@@ -750,20 +753,36 @@ int main() {
       }
     }
 
-    // Ctrl+Z / Ctrl+Shift+Z: sketch undo / redo.
-    if (!io.WantCaptureKeyboard && app.sceneMode == SceneMode::Sketch && app.hasActiveSketch() &&
-        !app.activeSketchLocked() &&
+    // Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z: undo/redo.
+    if (!io.WantCaptureKeyboard &&
         (glfwGetKey(window, GLFW_KEY_LEFT_CONTROL) == GLFW_PRESS ||
-         glfwGetKey(window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS) &&
-        glfwGetKey(window, GLFW_KEY_Z) == GLFW_PRESS) {
+         glfwGetKey(window, GLFW_KEY_RIGHT_CONTROL) == GLFW_PRESS)) {
       const bool shift = (glfwGetKey(window, GLFW_KEY_LEFT_SHIFT) == GLFW_PRESS ||
                           glfwGetKey(window, GLFW_KEY_RIGHT_SHIFT) == GLFW_PRESS);
-      if (shift && app.activeSketch().canRedo()) {
-        app.activeSketch().redo();
-        app.status = "Redo";
-      } else if (!shift && app.activeSketch().canUndo()) {
-        app.activeSketch().undo();
-        app.status = "Undo";
+      if (ImGui::IsKeyPressed(ImGuiKey_Z, false)) {
+        if (app.sceneMode == SceneMode::Sketch && app.hasActiveSketch() && !app.activeSketchLocked()) {
+          if (shift && app.activeSketch().canRedo()) {
+            app.activeSketch().redo();
+            app.status = "Redo";
+          } else if (!shift && app.activeSketch().canUndo()) {
+            app.activeSketch().undo();
+            app.status = "Undo";
+          }
+        } else {
+          if (shift && objectCanRedo(&app)) {
+            objectRedo(&app);
+            app.status = "Redo object edit";
+          } else if (!shift && objectCanUndo(&app)) {
+            objectUndo(&app);
+            app.status = "Undo object edit";
+          }
+        }
+      } else if (ImGui::IsKeyPressed(ImGuiKey_Y, false) &&
+                 app.sceneMode != SceneMode::Sketch) {
+        if (objectCanRedo(&app)) {
+          objectRedo(&app);
+          app.status = "Redo object edit";
+        }
       }
     }
 

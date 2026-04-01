@@ -1,11 +1,11 @@
 # CAD/CAM Roadmap
 
 ## M1: Core Architecture Stabilization
-- [ ] Lock geometry strategy for current cycle (mesh-first boundary + B-Rep seam definition)
-- [ ] Add versioned project metadata validation and migration hooks for `.nut` format
-- [ ] Add deterministic rebuild ordering contract and diagnostics
-- [ ] Normalize command/undo behavior for object create/delete/rename/visibility/lock/color
-- [ ] Add save/load round-trip checks for currently supported entities
+- [x] Lock geometry strategy for current cycle (mesh-first boundary + B-Rep seam definition)
+- [x] Add versioned project metadata validation and migration hooks for `.nut` format
+- [x] Add deterministic rebuild ordering contract and diagnostics
+- [x] Normalize command/undo behavior for object create/delete/rename/visibility/lock/color
+- [x] Add save/load round-trip checks for currently supported entities
 
 ## M2: Sketch and Parametric Foundation
 - [ ] Sketch entities: line, arc, circle, rectangle, polyline

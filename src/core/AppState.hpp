@@ -88,6 +88,14 @@ struct PlaneCreateState {
   char distanceBuffer[64] = {};
 };
 
+struct ObjectEditSnapshot {
+  std::vector<StlMesh> sceneObjects;
+  std::vector<ObjectMetadata> sceneObjectMeta;
+  int selectedObject = -1;
+  int nextObjectNumber = 1;
+  std::vector<int> browserSelectedObjects;
+};
+
 // Main application state
 struct AppState {
   // 3D Print
@@ -151,6 +159,9 @@ struct AppState {
   int timelineCursor = -1;  // index into timeline entries; -1 means no selection yet
   bool showAppSettings = false;
   bool showProjectSettings = false;
+
+  std::vector<ObjectEditSnapshot> objectUndoStack;
+  std::vector<ObjectEditSnapshot> objectRedoStack;
 
   bool hasActiveSketch() const {
     return activeSketchIndex >= 0 && activeSketchIndex < static_cast<int>(sketches.size());
