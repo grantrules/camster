@@ -84,6 +84,7 @@ bool applySubtractCombine(AppState* app, const std::vector<int>& targetsRaw,
 bool applyChamferEdges(AppState* app, int objectIndex,
                        const std::vector<ChamferEdgeSelection>& edges,
                        float distanceMm);
+bool applyDraftObject(AppState* app, int objectIndex, float angleDegrees);
 
 int pickObject(const AppState& app, glm::vec3 rayO, glm::vec3 rayD);
 std::optional<FacePickResult> pickObjectFace(const AppState& app, glm::vec3 rayO, glm::vec3 rayD);

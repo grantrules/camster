@@ -1170,6 +1170,74 @@ bool applyChamferEdges(AppState* app, int objectIndex,
   return true;
 }
 
+bool applyDraftObject(AppState* app, int objectIndex, float angleDegrees) {
+  if (!app) return false;
+  if (objectIndex < 0 || objectIndex >= static_cast<int>(app->sceneObjects.size())) return false;
+  if (objectIndex >= static_cast<int>(app->sceneObjectMeta.size()) ||
+      app->sceneObjectMeta[objectIndex].locked) {
+    return false;
+  }
+  if (!std::isfinite(angleDegrees)) return false;
+  if (std::abs(angleDegrees) < 1e-4f) return false;
+
+  const StlMesh& srcMesh = app->sceneObjects[objectIndex];
+  auto verts = srcMesh.vertices();
+  const auto& inds = srcMesh.indices();
+  if (verts.empty() || inds.empty()) return false;
+
+  glm::vec3 bmin = verts[0].position;
+  glm::vec3 bmax = verts[0].position;
+  for (const auto& v : verts) {
+    bmin = glm::min(bmin, v.position);
+    bmax = glm::max(bmax, v.position);
+  }
+
+  const float height = bmax.z - bmin.z;
+  if (height <= 1e-6f) return false;
+
+  glm::vec2 center((bmin.x + bmax.x) * 0.5f, (bmin.y + bmax.y) * 0.5f);
+  float maxRadius = 0.0f;
+  for (const auto& v : verts) {
+    maxRadius = std::max(maxRadius, glm::length(glm::vec2(v.position.x, v.position.y) - center));
+  }
+  if (maxRadius <= 1e-6f) return false;
+
+  constexpr float kPi = 3.14159265358979f;
+  const float angleRad = angleDegrees * kPi / 180.0f;
+  const float taperAtTop = std::tan(angleRad) * (height / maxRadius);
+  if (!std::isfinite(taperAtTop)) return false;
+
+  pushObjectUndoSnapshot(app);
+
+  for (auto& v : verts) {
+    const float t = glm::clamp((v.position.z - bmin.z) / height, 0.0f, 1.0f);
+    const float scale = std::max(0.05f, 1.0f - taperAtTop * t);
+    glm::vec2 p(v.position.x, v.position.y);
+    p = center + (p - center) * scale;
+    v.position.x = p.x;
+    v.position.y = p.y;
+  }
+
+  for (size_t i = 0; i + 2 < inds.size(); i += 3) {
+    StlVertex& va = verts[inds[i + 0]];
+    StlVertex& vb = verts[inds[i + 1]];
+    StlVertex& vc = verts[inds[i + 2]];
+    glm::vec3 n = glm::normalize(glm::cross(vb.position - va.position, vc.position - va.position));
+    if (glm::dot(n, n) < 1e-8f) {
+      n = {0.0f, 0.0f, 1.0f};
+    }
+    va.normal = n;
+    vb.normal = n;
+    vc.normal = n;
+  }
+
+  app->sceneObjects[objectIndex] = StlMesh::fromGeometry(std::move(verts), inds);
+  app->selectedObject = objectIndex;
+  app->browserSelectedObjects.assign(1, objectIndex);
+  rebuildCombinedMesh(app);
+  return true;
+}
+
 int pickObject(const AppState& app, glm::vec3 rayO, glm::vec3 rayD) {
   float bestT = std::numeric_limits<float>::max();
   int bestIdx = -1;

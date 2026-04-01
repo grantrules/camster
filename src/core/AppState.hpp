@@ -64,6 +64,12 @@ struct ChamferOptionsState {
   char distanceBuffer[64] = {};
 };
 
+struct DraftOptionsState {
+  bool visible = false;
+  int targetObject = -1;
+  char angleBuffer[64] = {};
+};
+
 struct SolidExtrudeOptionsState {
   bool visible = false;
   int sourceSketch = -1;
@@ -132,6 +138,7 @@ struct AppState {
   ExtrudeOptionsState extrudeOptions;
   CombineOptionsState combineOptions;
   ChamferOptionsState chamferOptions;
+  DraftOptionsState draftOptions;
   SolidExtrudeOptionsState solidExtrudeOptions;
 
   // Scene / sketch state.

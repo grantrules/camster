@@ -417,6 +417,12 @@ int main() {
       if (valueMm >= 0.0f) {
         app.status = sketch.applyConstraintToSelection(
             toolbarAction.constraintRequested, valueMm);
+        const auto diag = sketch.constraintDiagnostics();
+        if (diag.overConstrainedCount > 0) {
+          app.status += " (warning: over-constrained elements)";
+        } else if (diag.duplicateConstraintCount > 0) {
+          app.status += " (warning: duplicate constraints)";
+        }
       }
       }
     }
@@ -994,6 +1000,7 @@ int main() {
     drawExtrudeOptionsWindow(&app);
     drawCombineWindow(&app);
     drawChamferWindow(&app);
+    drawDraftWindow(&app);
 
     // --- File browser (modal — drawn every frame while visible) ---
     if (app.fileBrowser.isVisible()) {

@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <unordered_set>
 
 #include "sketch/Profile.hpp"
 
@@ -650,6 +651,103 @@ std::string Sketch::applyConstraintToSelection(ConstraintTool tool, float valueM
       break;
   }
   return "";
+}
+
+SketchConstraintDiagnostics Sketch::constraintDiagnostics() const {
+  SketchConstraintDiagnostics out;
+  out.totalConstraints = static_cast<int>(constraints_.size());
+
+  for (const auto& elem : elements_) {
+    switch (elem.status) {
+      case ConstraintStatus::Unconstrained:
+        ++out.unconstrainedCount;
+        break;
+      case ConstraintStatus::UnderConstrained:
+        ++out.underConstrainedCount;
+        break;
+      case ConstraintStatus::FullyConstrained:
+        ++out.fullyConstrainedCount;
+        break;
+      case ConstraintStatus::OverConstrained:
+        ++out.overConstrainedCount;
+        break;
+    }
+  }
+
+  auto constraintKey = [](const SketchConstraint& c) -> std::string {
+    return std::visit([](const auto& v) -> std::string {
+      using T = std::decay_t<decltype(v)>;
+      char b[128] = {};
+      if constexpr (std::is_same_v<T, CoincidentConstraint>) {
+        const bool swap = (v.elemA > v.elemB) || (v.elemA == v.elemB && v.pointA > v.pointB);
+        const size_t aElem = swap ? v.elemB : v.elemA;
+        const size_t bElem = swap ? v.elemA : v.elemB;
+        const int aPoint = swap ? v.pointB : v.pointA;
+        const int bPoint = swap ? v.pointA : v.pointB;
+        std::snprintf(b, sizeof(b), "coincident:%zu:%d:%zu:%d", aElem, aPoint, bElem, bPoint);
+      } else if constexpr (std::is_same_v<T, HorizontalConstraint>) {
+        std::snprintf(b, sizeof(b), "horizontal:%zu", v.elem);
+      } else if constexpr (std::is_same_v<T, VerticalConstraint>) {
+        std::snprintf(b, sizeof(b), "vertical:%zu", v.elem);
+      } else if constexpr (std::is_same_v<T, FixedConstraint>) {
+        std::snprintf(b, sizeof(b), "fixed:%zu:%d:%.5f:%.5f", v.elem, v.point, v.x, v.y);
+      } else if constexpr (std::is_same_v<T, LengthConstraint>) {
+        std::snprintf(b, sizeof(b), "length:%zu:%.5f", v.elem, v.valueMm);
+      } else if constexpr (std::is_same_v<T, RectangleWidthConstraint>) {
+        std::snprintf(b, sizeof(b), "rectw:%zu:%.5f", v.elem, v.valueMm);
+      } else if constexpr (std::is_same_v<T, RectangleHeightConstraint>) {
+        std::snprintf(b, sizeof(b), "recth:%zu:%.5f", v.elem, v.valueMm);
+      } else if constexpr (std::is_same_v<T, RadiusConstraint>) {
+        std::snprintf(b, sizeof(b), "radius:%zu:%.5f", v.elem, v.valueMm);
+      } else if constexpr (std::is_same_v<T, DiameterConstraint>) {
+        std::snprintf(b, sizeof(b), "diameter:%zu:%.5f", v.elem, v.valueMm);
+      } else if constexpr (std::is_same_v<T, AngleConstraint>) {
+        std::snprintf(b, sizeof(b), "angle:%zu:%.5f", v.elem, v.degrees);
+      } else if constexpr (std::is_same_v<T, ParallelConstraint>) {
+        const size_t a = std::min(v.elemA, v.elemB);
+        const size_t d = std::max(v.elemA, v.elemB);
+        std::snprintf(b, sizeof(b), "parallel:%zu:%zu", a, d);
+      } else if constexpr (std::is_same_v<T, PerpendicularConstraint>) {
+        const size_t a = std::min(v.elemA, v.elemB);
+        const size_t d = std::max(v.elemA, v.elemB);
+        std::snprintf(b, sizeof(b), "perpendicular:%zu:%zu", a, d);
+      } else if constexpr (std::is_same_v<T, EqualConstraint>) {
+        const size_t a = std::min(v.elemA, v.elemB);
+        const size_t d = std::max(v.elemA, v.elemB);
+        std::snprintf(b, sizeof(b), "equal:%zu:%zu", a, d);
+      } else if constexpr (std::is_same_v<T, TangentConstraint>) {
+        const size_t a = std::min(v.elemA, v.elemB);
+        const size_t d = std::max(v.elemA, v.elemB);
+        std::snprintf(b, sizeof(b), "tangent:%zu:%zu", a, d);
+      } else if constexpr (std::is_same_v<T, MidpointConstraint>) {
+        std::snprintf(b, sizeof(b), "midpoint:%zu:%zu:%d", v.lineElem, v.pointElem, v.point);
+      }
+      return std::string(b);
+    }, c);
+  };
+
+  std::unordered_set<std::string> seen;
+  for (const auto& c : constraints_) {
+    const std::string key = constraintKey(c);
+    if (!seen.insert(key).second) {
+      ++out.duplicateConstraintCount;
+    }
+  }
+
+  if (out.overConstrainedCount > 0) {
+    out.issues.push_back("Over-constrained elements detected");
+  }
+  if (out.duplicateConstraintCount > 0) {
+    out.issues.push_back("Duplicate constraints detected");
+  }
+  for (const auto& c : constraints_) {
+    if (std::holds_alternative<TangentConstraint>(c)) {
+      out.issues.push_back("Tangent constraints are stored but not solved yet");
+      break;
+    }
+  }
+
+  return out;
 }
 
 // --- Selection ---

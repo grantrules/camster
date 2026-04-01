@@ -1,6 +1,7 @@
 #include "ui/UIWindows.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstdio>
 #include <cmath>
 #include <string>
@@ -398,6 +399,14 @@ void drawMenuBar(AppState* app) {
       app->objectPickMode = ObjectPickMode::None;
       app->status = "Combine tool opened";
     }
+    const bool canDraft = app->sceneMode == SceneMode::View3D && app->selectedObject >= 0;
+    if (ImGui::MenuItem("Draft...", nullptr, false, canDraft)) {
+      app->draftOptions.visible = true;
+      app->draftOptions.targetObject = app->selectedObject;
+      std::snprintf(app->draftOptions.angleBuffer,
+                    sizeof(app->draftOptions.angleBuffer), "2.000");
+      app->status = "Draft tool opened";
+    }
     ImGui::EndMenu();
   }
 
@@ -487,6 +496,17 @@ void drawSolidToolbar(AppState* app) {
     app->objectPickMode = ObjectPickMode::ChamferEdges;
     app->chamferOptions.pickEdges = true;
     app->status = "Chamfer: click edges on the selected object";
+  }
+  if (!hasSelectedObject) ImGui::EndDisabled();
+
+  ImGui::SameLine();
+  if (!hasSelectedObject) ImGui::BeginDisabled();
+  if (ImGui::Button("Draft")) {
+    app->draftOptions.visible = true;
+    app->draftOptions.targetObject = app->selectedObject;
+    std::snprintf(app->draftOptions.angleBuffer,
+                  sizeof(app->draftOptions.angleBuffer), "2.000");
+    app->status = "Draft: positive tapers inward along +Z";
   }
   if (!hasSelectedObject) ImGui::EndDisabled();
 
@@ -790,6 +810,23 @@ void drawPanel(AppState* app) {
   ImGui::TextWrapped("LMB drag: rotate");
   ImGui::TextWrapped("Mouse wheel: zoom");
   ImGui::TextWrapped("Triangles: %d", static_cast<int>(app->mesh.indices().size() / 3));
+
+  if (app->sceneMode == SceneMode::Sketch && app->hasActiveSketch()) {
+    const auto diag = app->activeSketch().constraintDiagnostics();
+    ImGui::Separator();
+    ImGui::TextWrapped("Sketch Diagnostics");
+    ImGui::TextWrapped("Elements: U:%d  u:%d  F:%d  O:%d",
+                       diag.unconstrainedCount,
+                       diag.underConstrainedCount,
+                       diag.fullyConstrainedCount,
+                       diag.overConstrainedCount);
+    ImGui::TextWrapped("Constraints: %d (duplicates: %d)",
+                       diag.totalConstraints,
+                       diag.duplicateConstraintCount);
+    for (size_t i = 0; i < diag.issues.size() && i < 3; ++i) {
+      ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.2f, 1.0f), "- %s", diag.issues[i].c_str());
+    }
+  }
 
   ImGui::Separator();
 
@@ -1877,4 +1914,51 @@ void drawChamferWindow(AppState* app) {
     app->objectPickMode = ObjectPickMode::None;
     app->chamferOptions.pickEdges = false;
   }
+}
+
+void drawDraftWindow(AppState* app) {
+  if (!app->draftOptions.visible) return;
+
+  ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                          ImVec2(0.5f, 0.5f));
+  ImGui::SetNextWindowSize(ImVec2(420.0f, 0.0f), ImGuiCond_FirstUseEver);
+  bool open = app->draftOptions.visible;
+  if (ImGui::Begin("Draft Tool", &open)) {
+    int obj = app->draftOptions.targetObject;
+    if (obj < 0 || obj >= static_cast<int>(app->sceneObjects.size())) {
+      obj = app->selectedObject;
+    }
+    if (obj >= 0 && obj < static_cast<int>(app->sceneObjects.size())) {
+      app->draftOptions.targetObject = obj;
+      ImGui::Text("Target: %s", app->sceneObjectMeta[obj].name.data());
+    } else {
+      ImGui::TextDisabled("No target object selected");
+    }
+
+    ImGui::Text("Draft Angle (deg):");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(140.0f);
+    ImGui::InputText("##draftAngle", app->draftOptions.angleBuffer,
+                     sizeof(app->draftOptions.angleBuffer));
+    ImGui::TextDisabled("Positive = inward taper toward +Z");
+
+    if (ImGui::Button("Apply Draft")) {
+      char* endPtr = nullptr;
+      const float degrees = std::strtof(app->draftOptions.angleBuffer, &endPtr);
+      if (endPtr == app->draftOptions.angleBuffer || !std::isfinite(degrees)) {
+        app->status = "Draft: enter a valid angle in degrees";
+      } else if (!applyDraftObject(app, app->draftOptions.targetObject, degrees)) {
+        app->status = "Draft failed (check target object and lock state)";
+      } else {
+        app->status = "Draft applied";
+        app->draftOptions.visible = false;
+      }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Close")) {
+      app->draftOptions.visible = false;
+    }
+  }
+  ImGui::End();
+  app->draftOptions.visible = open;
 }
