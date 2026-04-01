@@ -135,9 +135,15 @@ void restoreObjectSnapshot(AppState* app, ObjectEditSnapshot snapshot) {
   if (!app) return;
   app->sceneObjects = std::move(snapshot.sceneObjects);
   app->sceneObjectMeta = std::move(snapshot.sceneObjectMeta);
+  app->referenceAxes = std::move(snapshot.referenceAxes);
+  app->referencePoints = std::move(snapshot.referencePoints);
   app->selectedObject = snapshot.selectedObject;
   app->nextObjectNumber = snapshot.nextObjectNumber;
+  app->nextAxisNumber = snapshot.nextAxisNumber;
+  app->nextPointNumber = snapshot.nextPointNumber;
   app->browserSelectedObjects = std::move(snapshot.browserSelectedObjects);
+  app->browserSelectedAxes = std::move(snapshot.browserSelectedAxes);
+  app->browserSelectedPoints = std::move(snapshot.browserSelectedPoints);
   normalizeDeterministicAppState(app);
 }
 
@@ -546,6 +552,7 @@ void createOffsetPlaneFromFace(AppState* app, int sourceObjectIndex,
 
 void createReferencePointFromSelection(AppState* app) {
   if (!app) return;
+  pushObjectUndoSnapshot(app);
   ReferencePointEntry entry;
   setName(entry.meta.name, "Point " + std::to_string(app->nextPointNumber++));
   entry.meta.visible = true;
@@ -575,6 +582,7 @@ void createReferencePointFromSelection(AppState* app) {
 
 void createReferenceAxisFromSelection(AppState* app) {
   if (!app) return;
+  pushObjectUndoSnapshot(app);
   ReferenceAxisEntry entry;
   setName(entry.meta.name, "Axis " + std::to_string(app->nextAxisNumber++));
   entry.meta.visible = true;
@@ -679,9 +687,15 @@ void pushObjectUndoSnapshot(AppState* app) {
   ObjectEditSnapshot snap;
   snap.sceneObjects = app->sceneObjects;
   snap.sceneObjectMeta = app->sceneObjectMeta;
+  snap.referenceAxes = app->referenceAxes;
+  snap.referencePoints = app->referencePoints;
   snap.selectedObject = app->selectedObject;
   snap.nextObjectNumber = app->nextObjectNumber;
+  snap.nextAxisNumber = app->nextAxisNumber;
+  snap.nextPointNumber = app->nextPointNumber;
   snap.browserSelectedObjects = app->browserSelectedObjects;
+  snap.browserSelectedAxes = app->browserSelectedAxes;
+  snap.browserSelectedPoints = app->browserSelectedPoints;
   app->objectUndoStack.push_back(std::move(snap));
   constexpr size_t kMaxObjectUndoLevels = 64;
   if (app->objectUndoStack.size() > kMaxObjectUndoLevels) {
@@ -703,9 +717,15 @@ bool objectUndo(AppState* app) {
   ObjectEditSnapshot current;
   current.sceneObjects = app->sceneObjects;
   current.sceneObjectMeta = app->sceneObjectMeta;
+  current.referenceAxes = app->referenceAxes;
+  current.referencePoints = app->referencePoints;
   current.selectedObject = app->selectedObject;
   current.nextObjectNumber = app->nextObjectNumber;
+  current.nextAxisNumber = app->nextAxisNumber;
+  current.nextPointNumber = app->nextPointNumber;
   current.browserSelectedObjects = app->browserSelectedObjects;
+  current.browserSelectedAxes = app->browserSelectedAxes;
+  current.browserSelectedPoints = app->browserSelectedPoints;
   app->objectRedoStack.push_back(std::move(current));
 
   ObjectEditSnapshot snap = std::move(app->objectUndoStack.back());
@@ -720,9 +740,15 @@ bool objectRedo(AppState* app) {
   ObjectEditSnapshot current;
   current.sceneObjects = app->sceneObjects;
   current.sceneObjectMeta = app->sceneObjectMeta;
+  current.referenceAxes = app->referenceAxes;
+  current.referencePoints = app->referencePoints;
   current.selectedObject = app->selectedObject;
   current.nextObjectNumber = app->nextObjectNumber;
+  current.nextAxisNumber = app->nextAxisNumber;
+  current.nextPointNumber = app->nextPointNumber;
   current.browserSelectedObjects = app->browserSelectedObjects;
+  current.browserSelectedAxes = app->browserSelectedAxes;
+  current.browserSelectedPoints = app->browserSelectedPoints;
   app->objectUndoStack.push_back(std::move(current));
 
   ObjectEditSnapshot snap = std::move(app->objectRedoStack.back());
@@ -750,6 +776,18 @@ bool validateDeterministicAppState(const AppState* app, std::string& error) {
     error = "timeline cursor out of range";
     return false;
   }
+  for (int idx : app->browserSelectedAxes) {
+    if (idx < 0 || idx >= static_cast<int>(app->referenceAxes.size())) {
+      error = "selected axis out of range";
+      return false;
+    }
+  }
+  for (int idx : app->browserSelectedPoints) {
+    if (idx < 0 || idx >= static_cast<int>(app->referencePoints.size())) {
+      error = "selected point out of range";
+      return false;
+    }
+  }
   return true;
 }
 
@@ -771,6 +809,8 @@ void clearSceneObjects(AppState* app) {
   app->pointSelectionAnchor = -1;
   app->nextAxisNumber = 1;
   app->nextPointNumber = 1;
+  app->objectUndoStack.clear();
+  app->objectRedoStack.clear();
 }
 
 void beginObjectRename(AppState* app, int idx) {

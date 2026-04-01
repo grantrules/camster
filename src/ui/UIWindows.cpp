@@ -310,6 +310,8 @@ void drawMenuBar(AppState* app) {
       exitSketchMode(app);
       clearSketches(app);
       initializeDefaultPlanes(app);
+      app->timeline.clear();
+      app->timelineCursor = -1;
       app->extrudeTool.cancel();
       app->sketchCreate = {};
       app->planeCreate = {};

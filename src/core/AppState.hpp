@@ -138,9 +138,15 @@ struct PlaneCreateState {
 struct ObjectEditSnapshot {
   std::vector<StlMesh> sceneObjects;
   std::vector<ObjectMetadata> sceneObjectMeta;
+  std::vector<ReferenceAxisEntry> referenceAxes;
+  std::vector<ReferencePointEntry> referencePoints;
   int selectedObject = -1;
   int nextObjectNumber = 1;
+  int nextAxisNumber = 1;
+  int nextPointNumber = 1;
   std::vector<int> browserSelectedObjects;
+  std::vector<int> browserSelectedAxes;
+  std::vector<int> browserSelectedPoints;
 };
 
 // Main application state
