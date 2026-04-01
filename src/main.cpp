@@ -33,11 +33,14 @@
 #include "Scene.hpp"
 #include "StlMesh.hpp"
 #include "VulkanRenderer.hpp"
+#include "drawing/Drawing.hpp"
+#include "interop/Step.hpp"
 #include "sketch/ExtrudeTool.hpp"
 #include "sketch/Profile.hpp"
 #include "sketch/Sketch.hpp"
 #include "sketch/SketchTool.hpp"
 #include "sketch/Constraint.hpp"
+#include "cam/Cam.hpp"
 #include "ui/FileBrowser.hpp"
 #include "ui/Toolbar.hpp"
 #include "ui/PrintWindow.hpp"
@@ -247,6 +250,8 @@ int main() {
   app.appSettings.load();  // load saved app settings (no-op if file missing)
   app.project.initFromAppSettings(app.appSettings);
   app.printSettings.load();
+  initializeCamDefaults(app.camTools, app.camStock, app.camBuilder);
+  resetCamSession(app.camBuilder, app.camOperations, -1, -1, app.camStock);
 
   app.selectedObject = -1;
   app.browserSelectedObjects.clear();
@@ -273,6 +278,8 @@ int main() {
         appendSceneObject(&app, std::move(result.mesh));
         app.selectedObject = 0;
         app.browserSelectedObjects.assign(1, 0);
+        resetCamSession(app.camBuilder, app.camOperations, app.selectedObject, -1, app.camStock);
+        app.camSelectedOperation = -1;
         rebuildCombinedMesh(&app);
         app.status = "Loaded " + result.path;
       }
@@ -329,6 +336,12 @@ int main() {
         app.sceneMode == SceneMode::Sketch && app.hasActiveSketch()) {
       exitSketchMode(&app);
       app.status = "Exited sketch mode";
+    }
+
+    if (toolbarAction.projectToolRequested &&
+        app.sceneMode == SceneMode::Sketch && app.hasActiveSketch()) {
+      app.showProjectTool = true;
+      app.status = "Project tool opened";
     }
 
     auto recordActiveSketchEdit = [&app]() {
@@ -1041,6 +1054,13 @@ int main() {
       allLines.push_back({point.position + glm::vec3(0.0f, 0.0f, kPointSize), color});
     }
 
+    // CAM overlays are only shown while the Manufacture workspace is open.
+    // This avoids an always-on stock box that looks like an unrelated rectangle
+    // and can be mistaken for object visibility issues.
+    if (app.sceneMode == SceneMode::View3D && app.showCamWindow) {
+      appendCamPreviewLines(app.camStock, app.camOperations, allLines);
+    }
+
     app.renderer.setLines(allLines);
 
     drawPanel(&app);
@@ -1061,20 +1081,27 @@ int main() {
     drawChamferWindow(&app);
     drawFilletWindow(&app);
     drawDraftWindow(&app);
+    drawCamWindow(&app);
+    drawDrawingWindow(&app);
+    drawDfmWindow(&app);
 
     // --- File browser (modal — drawn every frame while visible) ---
     if (app.fileBrowser.isVisible()) {
       if (app.fileBrowser.draw() && app.fileBrowser.confirmed()) {
         if (!app.loadingMesh) {
           const std::string path = app.fileBrowser.selectedPath().string();
+          const ImportIntent importIntent = app.importIntent;
           app.loadingMesh = true;
           app.status = "Loading " + path + "...";
-          app.pendingLoad = std::async(std::launch::async, [path]() {
+          app.pendingLoad = std::async(std::launch::async, [path, importIntent]() {
             AppState::LoadResult result;
             result.path = path;
             StlMesh loaded;
             std::string err;
-            if (!loaded.loadFromFile(path, err)) {
+            const bool ok = (importIntent == ImportIntent::Step)
+                                ? importStepMesh(path, loaded, err)
+                                : loaded.loadFromFile(path, err);
+            if (!ok) {
               result.success = false;
               result.error = err;
               return result;
@@ -1090,21 +1117,68 @@ int main() {
     // --- Export file browser ---
     if (app.exportBrowser.isVisible()) {
       if (app.exportBrowser.draw() && app.exportBrowser.confirmed()) {
-        if (app.selectedObject >= 0 &&
-            app.selectedObject < static_cast<int>(app.sceneObjects.size())) {
+        if (app.exportIntent == ExportIntent::Stl) {
+          if (app.selectedObject >= 0 &&
+              app.selectedObject < static_cast<int>(app.sceneObjects.size())) {
+            std::string path = app.exportBrowser.selectedPath().string();
+            if (path.size() < 4 || path.substr(path.size() - 4) != ".stl") {
+              path += ".stl";
+            }
+            std::string err;
+            const float scale = fromMm(1.0f, app.project.exportUnit);
+            if (app.sceneObjects[app.selectedObject].saveAsBinaryScaled(path, scale, err)) {
+              app.status = "Exported " + path + " (" + unitSuffix(app.project.exportUnit) + ")";
+            } else {
+              app.status = "Export failed: " + err;
+            }
+          }
+        } else if (app.exportIntent == ExportIntent::Gcode) {
           std::string path = app.exportBrowser.selectedPath().string();
-          // Ensure .stl extension.
-          if (path.size() < 4 ||
-              path.substr(path.size() - 4) != ".stl") {
-            path += ".stl";
+          const bool hasNc = path.size() >= 3 && path.substr(path.size() - 3) == ".nc";
+          const bool hasGcode = path.size() >= 6 && path.substr(path.size() - 6) == ".gcode";
+          if (!hasNc && !hasGcode) {
+            path += ".nc";
           }
           std::string err;
-          // Scale from internal mm to the project's export unit.
-          const float scale = fromMm(1.0f, app.project.exportUnit);
-          if (app.sceneObjects[app.selectedObject].saveAsBinaryScaled(path, scale, err)) {
-            app.status = "Exported " + path + " (" + unitSuffix(app.project.exportUnit) + ")";
+          if (exportCamGcode(path, app.camPostProcessor, app.camStock,
+                             app.camTools, app.camOperations, err)) {
+            app.status = "Exported toolpath " + path;
           } else {
-            app.status = "Export failed: " + err;
+            app.status = "G-code export failed: " + err;
+          }
+        } else if (app.exportIntent == ExportIntent::Step) {
+          if (app.selectedObject >= 0 &&
+              app.selectedObject < static_cast<int>(app.sceneObjects.size())) {
+            std::string path = app.exportBrowser.selectedPath().string();
+            const bool hasStep = path.size() >= 5 && path.substr(path.size() - 5) == ".step";
+            const bool hasStp = path.size() >= 4 && path.substr(path.size() - 4) == ".stp";
+            if (!hasStep && !hasStp) path += ".step";
+            std::string err;
+            if (exportStepMesh(path, app.sceneObjects[app.selectedObject], err)) {
+              app.status = "Exported STEP " + path;
+            } else {
+              app.status = "STEP export failed: " + err;
+            }
+          }
+        } else if (app.exportIntent == ExportIntent::Pdf) {
+          std::string path = app.exportBrowser.selectedPath().string();
+          const bool hasPdf = path.size() >= 4 && path.substr(path.size() - 4) == ".pdf";
+          if (!hasPdf) path += ".pdf";
+          std::string err;
+          if (exportDrawingPdf(path, app.drawingSheet, err)) {
+            app.status = "Exported drawing PDF " + path;
+          } else {
+            app.status = "PDF export failed: " + err;
+          }
+        } else if (app.exportIntent == ExportIntent::Dxf) {
+          std::string path = app.exportBrowser.selectedPath().string();
+          const bool hasDxf = path.size() >= 4 && path.substr(path.size() - 4) == ".dxf";
+          if (!hasDxf) path += ".dxf";
+          std::string err;
+          if (exportDrawingDxf(path, app.drawingSheet, err)) {
+            app.status = "Exported drawing DXF " + path;
+          } else {
+            app.status = "DXF export failed: " + err;
           }
         }
       }

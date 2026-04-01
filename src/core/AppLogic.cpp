@@ -2,10 +2,13 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdint>
 #include <limits>
 #include <random>
+#include <unordered_map>
 #include <utility>
 
 #include <glm/common.hpp>
@@ -75,6 +78,63 @@ bool aabbOverlap(const Aabb& a, const Aabb& b) {
   return a.min.x <= b.max.x && a.max.x >= b.min.x &&
          a.min.y <= b.max.y && a.max.y >= b.min.y &&
          a.min.z <= b.max.z && a.max.z >= b.min.z;
+}
+
+bool aabbOverlapEpsilon(const Aabb& a, const Aabb& b, float eps) {
+  if (!a.valid || !b.valid) return false;
+  return a.min.x <= b.max.x + eps && a.max.x + eps >= b.min.x &&
+         a.min.y <= b.max.y + eps && a.max.y + eps >= b.min.y &&
+         a.min.z <= b.max.z + eps && a.max.z + eps >= b.min.z;
+}
+
+enum class AabbPairRelation { None, CoplanarTouch, VolumeOverlap };
+
+AabbPairRelation classifyAabbPair(const Aabb& a, const Aabb& b, float eps) {
+  if (!aabbOverlapEpsilon(a, b, eps)) return AabbPairRelation::None;
+
+  const auto axisOverlap = [eps](float amin, float amax, float bmin, float bmax) {
+    const float lo = std::max(amin, bmin);
+    const float hi = std::min(amax, bmax);
+    return hi - lo;
+  };
+
+  const float ox = axisOverlap(a.min.x, a.max.x, b.min.x, b.max.x);
+  const float oy = axisOverlap(a.min.y, a.max.y, b.min.y, b.max.y);
+  const float oz = axisOverlap(a.min.z, a.max.z, b.min.z, b.max.z);
+
+  const bool xPositive = ox > eps;
+  const bool yPositive = oy > eps;
+  const bool zPositive = oz > eps;
+  const int positiveAxes = static_cast<int>(xPositive) +
+                           static_cast<int>(yPositive) +
+                           static_cast<int>(zPositive);
+
+  if (positiveAxes >= 3) {
+    return AabbPairRelation::VolumeOverlap;
+  }
+  if (positiveAxes >= 2 && (std::abs(ox) <= eps || std::abs(oy) <= eps || std::abs(oz) <= eps)) {
+    return AabbPairRelation::CoplanarTouch;
+  }
+  return AabbPairRelation::None;
+}
+
+ObjectMetadata makeBooleanResultMeta(const AppState* app, int sourceObjectIndex, int* nextObjectNumber) {
+  ObjectMetadata meta;
+  const bool validSource = app && sourceObjectIndex >= 0 &&
+                           sourceObjectIndex < static_cast<int>(app->sceneObjectMeta.size());
+  if (validSource) {
+    const auto& src = app->sceneObjectMeta[sourceObjectIndex];
+    setName(meta.name, std::string(src.name.data()) + " (Boolean)");
+    meta.colorRgb = src.colorRgb;
+  } else {
+    const int n = nextObjectNumber ? (*nextObjectNumber)++ : 1;
+    setName(meta.name, "Object " + std::to_string(n));
+    const glm::vec3 color = randomPastelColor();
+    meta.colorRgb = {color.x, color.y, color.z};
+  }
+  meta.visible = true;
+  meta.locked = false;
+  return meta;
 }
 
 void normalizeDeterministicAppState(AppState* app) {
@@ -257,6 +317,57 @@ ResolvedPlane resolvePlaneRecursive(const AppState* app, int planeId, int depth)
   }
 
   return {};
+}
+
+uint64_t fnv1aAppend(uint64_t hash, uint32_t v) {
+  hash ^= static_cast<uint64_t>(v);
+  hash *= 1099511628211ull;
+  return hash;
+}
+
+uint32_t quantizeFloat(float v) {
+  return static_cast<uint32_t>(std::llround(v * 10000.0f));
+}
+
+struct QuantEdgeKey {
+  int ax = 0;
+  int ay = 0;
+  int az = 0;
+  int bx = 0;
+  int by = 0;
+  int bz = 0;
+
+  bool operator==(const QuantEdgeKey& rhs) const {
+    return ax == rhs.ax && ay == rhs.ay && az == rhs.az &&
+           bx == rhs.bx && by == rhs.by && bz == rhs.bz;
+  }
+};
+
+struct QuantEdgeKeyHasher {
+  size_t operator()(const QuantEdgeKey& k) const {
+    size_t h = 1469598103934665603ull;
+    h ^= static_cast<size_t>(k.ax + 0x9e3779b9);
+    h *= 1099511628211ull;
+    h ^= static_cast<size_t>(k.ay + 0x9e3779b9);
+    h *= 1099511628211ull;
+    h ^= static_cast<size_t>(k.az + 0x9e3779b9);
+    h *= 1099511628211ull;
+    h ^= static_cast<size_t>(k.bx + 0x9e3779b9);
+    h *= 1099511628211ull;
+    h ^= static_cast<size_t>(k.by + 0x9e3779b9);
+    h *= 1099511628211ull;
+    h ^= static_cast<size_t>(k.bz + 0x9e3779b9);
+    h *= 1099511628211ull;
+    return h;
+  }
+};
+
+QuantEdgeKey makeQuantEdge(glm::vec3 a, glm::vec3 b) {
+  const auto q = [](float v) { return static_cast<int>(std::llround(v * 1000.0f)); };
+  const bool swap = (a.x > b.x) || (a.x == b.x && a.y > b.y) ||
+                    (a.x == b.x && a.y == b.y && a.z > b.z);
+  if (swap) std::swap(a, b);
+  return {q(a.x), q(a.y), q(a.z), q(b.x), q(b.y), q(b.z)};
 }
 }  // namespace
 
@@ -488,7 +599,7 @@ void createSketch(AppState* app, int planeId) {
   app->browserSelectedSketches.assign(1, app->activeSketchIndex);
   app->sketchSelectionAnchor = app->activeSketchIndex;
   app->sceneMode = SceneMode::Sketch;
-  app->showProjectTool = true;
+  app->showProjectTool = false;
   app->partialSelectedObject = -1;
   snapCameraToPlane(app, resolved.plane);
 }
@@ -791,6 +902,109 @@ bool validateDeterministicAppState(const AppState* app, std::string& error) {
   return true;
 }
 
+bool validateMeshTopology(const StlMesh& mesh, std::string& error) {
+  const auto& verts = mesh.vertices();
+  const auto& inds = mesh.indices();
+  if (verts.empty() || inds.empty()) {
+    error = "empty mesh";
+    return false;
+  }
+  if (inds.size() % 3 != 0) {
+    error = "index buffer is not triangle-aligned";
+    return false;
+  }
+
+  std::unordered_map<QuantEdgeKey, int, QuantEdgeKeyHasher> edgeUseCount;
+  edgeUseCount.reserve(inds.size());
+  for (size_t i = 0; i + 2 < inds.size(); i += 3) {
+    const uint32_t ia = inds[i + 0];
+    const uint32_t ib = inds[i + 1];
+    const uint32_t ic = inds[i + 2];
+    if (ia >= verts.size() || ib >= verts.size() || ic >= verts.size()) {
+      error = "triangle index out of range";
+      return false;
+    }
+    const glm::vec3 a = verts[ia].position;
+    const glm::vec3 b = verts[ib].position;
+    const glm::vec3 c = verts[ic].position;
+    const float area2 = glm::length(glm::cross(b - a, c - a));
+    if (area2 <= 1e-8f) {
+      error = "degenerate triangle detected";
+      return false;
+    }
+
+    ++edgeUseCount[makeQuantEdge(a, b)];
+    ++edgeUseCount[makeQuantEdge(b, c)];
+    ++edgeUseCount[makeQuantEdge(c, a)];
+  }
+
+  int boundaryEdges = 0;
+  int nonManifoldEdges = 0;
+  for (const auto& [_, count] : edgeUseCount) {
+    if (count == 1) ++boundaryEdges;
+    if (count > 2) ++nonManifoldEdges;
+  }
+  if (nonManifoldEdges > 0) {
+    error = "non-manifold edges detected";
+    return false;
+  }
+  if (boundaryEdges > 0) {
+    error = "open boundary edges detected";
+    return false;
+  }
+  return true;
+}
+
+uint64_t meshDeterminismHash(const StlMesh& mesh) {
+  uint64_t hash = 1469598103934665603ull;
+  for (const auto& v : mesh.vertices()) {
+    hash = fnv1aAppend(hash, quantizeFloat(v.position.x));
+    hash = fnv1aAppend(hash, quantizeFloat(v.position.y));
+    hash = fnv1aAppend(hash, quantizeFloat(v.position.z));
+    hash = fnv1aAppend(hash, quantizeFloat(v.normal.x));
+    hash = fnv1aAppend(hash, quantizeFloat(v.normal.y));
+    hash = fnv1aAppend(hash, quantizeFloat(v.normal.z));
+  }
+  for (uint32_t idx : mesh.indices()) {
+    hash = fnv1aAppend(hash, idx);
+  }
+  return hash;
+}
+
+bool replaceSceneObjectMesh(AppState* app, int objectIndex, const StlMesh& mesh,
+                            const std::string& newNameSuffix) {
+  if (!app) return false;
+  if (objectIndex < 0 || objectIndex >= static_cast<int>(app->sceneObjects.size())) return false;
+  if (objectIndex < static_cast<int>(app->sceneObjectMeta.size()) &&
+      app->sceneObjectMeta[objectIndex].locked) {
+    return false;
+  }
+  std::string topoError;
+  if (!validateMeshTopology(mesh, topoError)) {
+    app->lastFeatureFailure = {"TOPOLOGY_INVALID", topoError, objectIndex, -1};
+    return false;
+  }
+
+  pushObjectUndoSnapshot(app);
+  app->sceneObjects[objectIndex] = mesh;
+  if (objectIndex < static_cast<int>(app->sceneObjectMeta.size()) && !newNameSuffix.empty()) {
+    const std::string baseName = app->sceneObjectMeta[objectIndex].name.data();
+    setName(app->sceneObjectMeta[objectIndex].name, baseName + " " + newNameSuffix);
+  }
+  app->selectedObject = objectIndex;
+  app->browserSelectedObjects.assign(1, objectIndex);
+  rebuildCombinedMesh(app);
+  return true;
+}
+
+bool isPlaneReferenceBroken(const AppState* app, int planeIndex) {
+  if (!app || planeIndex < 0 || planeIndex >= static_cast<int>(app->planes.size())) return false;
+  const auto& plane = app->planes[planeIndex];
+  if (plane.reference.kind == PlaneReferenceKind::Principal) return false;
+  const ResolvedPlane resolved = resolvePlane(app, plane.id);
+  return !resolved.valid;
+}
+
 void clearSceneObjects(AppState* app) {
   app->sceneObjects.clear();
   app->sceneObjectMeta.clear();
@@ -929,6 +1143,11 @@ void rebuildCombinedMesh(AppState* app) {
 bool applyAddExtrude(AppState* app, const StlMesh& extruded,
                      const std::vector<int>& targetsRaw) {
   if (extruded.empty()) return false;
+  std::string topoError;
+  if (!validateMeshTopology(extruded, topoError)) {
+    app->lastFeatureFailure = {"TOPOLOGY_INVALID", topoError, -1, app->activeSketchIndex};
+    return false;
+  }
   pushObjectUndoSnapshot(app);
 
   std::vector<int> targets = targetsRaw;
@@ -985,7 +1204,7 @@ bool applyAddExtrude(AppState* app, const StlMesh& extruded,
 
 bool applyAddCombine(AppState* app, const std::vector<int>& targetsRaw,
                      const std::vector<int>& toolsRaw, bool keepTools) {
-  pushObjectUndoSnapshot(app);
+  auto perfStart = std::chrono::steady_clock::now();
   std::vector<int> targets = targetsRaw;
   std::vector<int> tools = toolsRaw;
   sanitizeObjectIndices(targets, static_cast<int>(app->sceneObjects.size()));
@@ -1005,9 +1224,37 @@ bool applyAddCombine(AppState* app, const std::vector<int>& targetsRaw,
   }
   if (targets.empty() || tools.empty()) return false;
 
+  constexpr float kCombineEpsMm = 0.05f;
+  std::vector<Aabb> targetBoxes;
+  std::vector<Aabb> toolBoxes;
+  targetBoxes.reserve(targets.size());
+  toolBoxes.reserve(tools.size());
+  for (int idx : targets) targetBoxes.push_back(meshAabb(app->sceneObjects[idx]));
+  for (int idx : tools) toolBoxes.push_back(meshAabb(app->sceneObjects[idx]));
+
+  bool hasContact = false;
+  for (const auto& t : targetBoxes) {
+    for (const auto& u : toolBoxes) {
+      const AabbPairRelation rel = classifyAabbPair(t, u, kCombineEpsMm);
+      if (rel == AabbPairRelation::VolumeOverlap || rel == AabbPairRelation::CoplanarTouch) {
+        hasContact = true;
+        break;
+      }
+    }
+    if (hasContact) break;
+  }
+  if (!hasContact) return false;
+
+  pushObjectUndoSnapshot(app);
+
   StlMesh merged;
   for (int idx : targets) merged.append(app->sceneObjects[idx]);
   for (int idx : tools) merged.append(app->sceneObjects[idx]);
+  std::string topoError;
+  if (!validateMeshTopology(merged, topoError)) {
+    app->lastFeatureFailure = {"TOPOLOGY_INVALID", topoError, targets.front(), -1};
+    return false;
+  }
 
   std::vector<bool> remove(app->sceneObjects.size(), false);
   for (int idx : targets) remove[idx] = true;
@@ -1026,12 +1273,7 @@ bool applyAddCombine(AppState* app, const std::vector<int>& targetsRaw,
     }
   }
   next.push_back(std::move(merged));
-  ObjectMetadata mergedMeta;
-  setName(mergedMeta.name, "Object " + std::to_string(app->nextObjectNumber++));
-  {
-    const glm::vec3 color = randomPastelColor();
-    mergedMeta.colorRgb = {color.x, color.y, color.z};
-  }
+  ObjectMetadata mergedMeta = makeBooleanResultMeta(app, targets.front(), &app->nextObjectNumber);
   nextMeta.push_back(mergedMeta);
 
   app->sceneObjects = std::move(next);
@@ -1039,11 +1281,14 @@ bool applyAddCombine(AppState* app, const std::vector<int>& targetsRaw,
   app->selectedObject = static_cast<int>(app->sceneObjects.size()) - 1;
   app->browserSelectedObjects.assign(1, app->selectedObject);
   rebuildCombinedMesh(app);
+  const auto perfEnd = std::chrono::steady_clock::now();
+  app->opPerf.combineMs = std::chrono::duration<float, std::milli>(perfEnd - perfStart).count();
   return true;
 }
 
 bool applyIntersectCombine(AppState* app, const std::vector<int>& targetsRaw,
                            const std::vector<int>& toolsRaw, bool keepTools) {
+  auto perfStart = std::chrono::steady_clock::now();
   std::vector<int> targets = targetsRaw;
   std::vector<int> tools = toolsRaw;
   sanitizeObjectIndices(targets, static_cast<int>(app->sceneObjects.size()));
@@ -1077,7 +1322,8 @@ bool applyIntersectCombine(AppState* app, const std::vector<int>& targetsRaw,
   std::vector<int> overlapTools;
   for (size_t ti = 0; ti < targets.size(); ++ti) {
     for (size_t oi = 0; oi < tools.size(); ++oi) {
-      if (aabbOverlap(targetBoxes[ti], toolBoxes[oi])) {
+      const AabbPairRelation rel = classifyAabbPair(targetBoxes[ti], toolBoxes[oi], 0.05f);
+      if (rel == AabbPairRelation::VolumeOverlap || rel == AabbPairRelation::CoplanarTouch) {
         addUniqueIndex(overlapTargets, targets[ti]);
         addUniqueIndex(overlapTools, tools[oi]);
       }
@@ -1089,6 +1335,11 @@ bool applyIntersectCombine(AppState* app, const std::vector<int>& targetsRaw,
   StlMesh merged;
   for (int idx : overlapTargets) merged.append(app->sceneObjects[idx]);
   for (int idx : overlapTools) merged.append(app->sceneObjects[idx]);
+  std::string topoError;
+  if (!validateMeshTopology(merged, topoError)) {
+    app->lastFeatureFailure = {"TOPOLOGY_INVALID", topoError, overlapTargets.front(), -1};
+    return false;
+  }
 
   std::vector<bool> remove(app->sceneObjects.size(), false);
   for (int idx : targets) remove[idx] = true;
@@ -1108,10 +1359,8 @@ bool applyIntersectCombine(AppState* app, const std::vector<int>& targetsRaw,
   }
 
   next.push_back(std::move(merged));
-  ObjectMetadata mergedMeta;
-  setName(mergedMeta.name, "Object " + std::to_string(app->nextObjectNumber++));
-  const glm::vec3 color = randomPastelColor();
-  mergedMeta.colorRgb = {color.x, color.y, color.z};
+  ObjectMetadata mergedMeta = makeBooleanResultMeta(app, overlapTargets.front(),
+                                                    &app->nextObjectNumber);
   nextMeta.push_back(mergedMeta);
 
   app->sceneObjects = std::move(next);
@@ -1119,6 +1368,8 @@ bool applyIntersectCombine(AppState* app, const std::vector<int>& targetsRaw,
   app->selectedObject = static_cast<int>(app->sceneObjects.size()) - 1;
   app->browserSelectedObjects.assign(1, app->selectedObject);
   rebuildCombinedMesh(app);
+  const auto perfEnd = std::chrono::steady_clock::now();
+  app->opPerf.combineMs = std::chrono::duration<float, std::milli>(perfEnd - perfStart).count();
   return true;
 }
 
@@ -1169,7 +1420,7 @@ bool applySubtractExtrude(AppState* app, const StlMesh& extruded,
 
 bool applySubtractCombine(AppState* app, const std::vector<int>& targetsRaw,
                           const std::vector<int>& toolsRaw, bool keepTools) {
-  pushObjectUndoSnapshot(app);
+  auto perfStart = std::chrono::steady_clock::now();
   std::vector<int> targets = targetsRaw;
   std::vector<int> tools = toolsRaw;
   sanitizeObjectIndices(targets, static_cast<int>(app->sceneObjects.size()));
@@ -1189,20 +1440,28 @@ bool applySubtractCombine(AppState* app, const std::vector<int>& targetsRaw,
   }
   if (targets.empty() || tools.empty()) return false;
 
+  constexpr float kCombineEpsMm = 0.05f;
   std::vector<Aabb> toolBoxes;
   toolBoxes.reserve(tools.size());
   for (int idx : tools) toolBoxes.push_back(meshAabb(app->sceneObjects[idx]));
 
   std::vector<bool> remove(app->sceneObjects.size(), false);
+  bool removedAnyTarget = false;
   for (int idx : targets) {
     const Aabb targetBox = meshAabb(app->sceneObjects[idx]);
     for (const Aabb& tb : toolBoxes) {
-      if (aabbOverlap(targetBox, tb)) {
+      const AabbPairRelation rel = classifyAabbPair(targetBox, tb, kCombineEpsMm);
+      if (rel == AabbPairRelation::VolumeOverlap || rel == AabbPairRelation::CoplanarTouch) {
         remove[idx] = true;
+        removedAnyTarget = true;
         break;
       }
     }
   }
+  if (!removedAnyTarget) return false;
+
+  pushObjectUndoSnapshot(app);
+
   if (!keepTools) {
     for (int idx : tools) remove[idx] = true;
   }
@@ -1224,9 +1483,26 @@ bool applySubtractCombine(AppState* app, const std::vector<int>& targetsRaw,
   if (!removedAny) return false;
   app->sceneObjects = std::move(next);
   app->sceneObjectMeta = std::move(nextMeta);
-  app->selectedObject = app->sceneObjects.empty() ? -1 : 0;
-  app->browserSelectedObjects = app->sceneObjects.empty() ? std::vector<int>{} : std::vector<int>{0};
+  app->selectedObject = -1;
+  for (int oldIdx : targets) {
+    int shift = 0;
+    for (int i = 0; i < oldIdx; ++i) {
+      if (remove[i]) ++shift;
+    }
+    if (!remove[oldIdx]) {
+      app->selectedObject = oldIdx - shift;
+      break;
+    }
+  }
+  if (app->selectedObject < 0 && !app->sceneObjects.empty()) {
+    app->selectedObject = 0;
+  }
+  app->browserSelectedObjects = app->selectedObject >= 0
+                                    ? std::vector<int>{app->selectedObject}
+                                    : std::vector<int>{};
   rebuildCombinedMesh(app);
+  const auto perfEnd = std::chrono::steady_clock::now();
+  app->opPerf.combineMs = std::chrono::duration<float, std::milli>(perfEnd - perfStart).count();
   return true;
 }
 
@@ -1240,6 +1516,7 @@ bool applyChamferEdges(AppState* app, int objectIndex,
     return false;
   }
 
+  auto perfStart = std::chrono::steady_clock::now();
   pushObjectUndoSnapshot(app);
 
   const StlMesh& srcMesh = app->sceneObjects[objectIndex];
@@ -1284,10 +1561,38 @@ bool applyChamferEdges(AppState* app, int objectIndex,
     vc.normal = n;
   }
 
-  app->sceneObjects[objectIndex] = StlMesh::fromGeometry(std::move(verts), inds);
+  const StlMesh candidate = StlMesh::fromGeometry(std::move(verts), inds);
+  std::string topoError;
+  if (!validateMeshTopology(candidate, topoError)) {
+    app->lastFeatureFailure = {"TOPOLOGY_INVALID", topoError, objectIndex, -1};
+    return false;
+  }
+  auto nearestVertex = [&](glm::vec3 p) {
+    const auto& outVerts = candidate.vertices();
+    if (outVerts.empty()) return p;
+    glm::vec3 best = outVerts.front().position;
+    float bestD2 = glm::dot(best - p, best - p);
+    for (const auto& v : outVerts) {
+      const float d2 = glm::dot(v.position - p, v.position - p);
+      if (d2 < bestD2) {
+        bestD2 = d2;
+        best = v.position;
+      }
+    }
+    return best;
+  };
+
+  app->sceneObjects[objectIndex] = candidate;
   app->selectedObject = objectIndex;
   app->browserSelectedObjects.assign(1, objectIndex);
+  for (auto& edge : app->chamferOptions.edges) {
+    if (edge.objectIndex != objectIndex) continue;
+    edge.a = nearestVertex(edge.a);
+    edge.b = nearestVertex(edge.b);
+  }
   rebuildCombinedMesh(app);
+  const auto perfEnd = std::chrono::steady_clock::now();
+  app->opPerf.chamferMs = std::chrono::duration<float, std::milli>(perfEnd - perfStart).count();
   return true;
 }
 
@@ -1306,6 +1611,7 @@ bool applyFilletEdges(AppState* app, int objectIndex,
   const auto& inds = srcMesh.indices();
   if (verts.empty() || inds.empty()) return false;
 
+  auto perfStart = std::chrono::steady_clock::now();
   pushObjectUndoSnapshot(app);
 
   auto nearestPointOnSegment = [](glm::vec3 p, glm::vec3 a, glm::vec3 b) {
@@ -1377,10 +1683,38 @@ bool applyFilletEdges(AppState* app, int objectIndex,
     vc.normal = n;
   }
 
-  app->sceneObjects[objectIndex] = StlMesh::fromGeometry(std::move(verts), inds);
+  const StlMesh candidate = StlMesh::fromGeometry(std::move(verts), inds);
+  std::string topoError;
+  if (!validateMeshTopology(candidate, topoError)) {
+    app->lastFeatureFailure = {"TOPOLOGY_INVALID", topoError, objectIndex, -1};
+    return false;
+  }
+  auto nearestVertex = [&](glm::vec3 p) {
+    const auto& outVerts = candidate.vertices();
+    if (outVerts.empty()) return p;
+    glm::vec3 best = outVerts.front().position;
+    float bestD2 = glm::dot(best - p, best - p);
+    for (const auto& v : outVerts) {
+      const float d2 = glm::dot(v.position - p, v.position - p);
+      if (d2 < bestD2) {
+        bestD2 = d2;
+        best = v.position;
+      }
+    }
+    return best;
+  };
+
+  app->sceneObjects[objectIndex] = candidate;
   app->selectedObject = objectIndex;
   app->browserSelectedObjects.assign(1, objectIndex);
+  for (auto& edge : app->filletOptions.edges) {
+    if (edge.objectIndex != objectIndex) continue;
+    edge.a = nearestVertex(edge.a);
+    edge.b = nearestVertex(edge.b);
+  }
   rebuildCombinedMesh(app);
+  const auto perfEnd = std::chrono::steady_clock::now();
+  app->opPerf.filletMs = std::chrono::duration<float, std::milli>(perfEnd - perfStart).count();
   return true;
 }
 
@@ -1445,7 +1779,13 @@ bool applyDraftObject(AppState* app, int objectIndex, float angleDegrees) {
     vc.normal = n;
   }
 
-  app->sceneObjects[objectIndex] = StlMesh::fromGeometry(std::move(verts), inds);
+  const StlMesh candidate = StlMesh::fromGeometry(std::move(verts), inds);
+  std::string topoError;
+  if (!validateMeshTopology(candidate, topoError)) {
+    app->lastFeatureFailure = {"TOPOLOGY_INVALID", topoError, objectIndex, -1};
+    return false;
+  }
+  app->sceneObjects[objectIndex] = candidate;
   app->selectedObject = objectIndex;
   app->browserSelectedObjects.assign(1, objectIndex);
   rebuildCombinedMesh(app);

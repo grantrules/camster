@@ -127,6 +127,14 @@ ToolbarAction Toolbar::draw(SketchTool& tool, ExtrudeTool& extrude, bool hasSele
       ImGui::Text("|");
       ImGui::SameLine();
 
+      if (ImGui::Button("Project")) {
+        action.projectToolRequested = true;
+      }
+
+      ImGui::SameLine();
+      ImGui::Text("|");
+      ImGui::SameLine();
+
       // Construction toggle (needs selection).
       if (!hasSelection) ImGui::BeginDisabled();
       if (ImGui::Button("Construction")) {
