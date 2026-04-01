@@ -10,6 +10,17 @@ namespace {
 
 float cross2D(glm::vec2 a, glm::vec2 b) { return a.x * b.y - a.y * b.x; }
 
+int planeWindingSign(SketchPlane plane) {
+  // toWorld basis orientation relative to planeNormal:
+  // XY: +1, XZ: -1, YZ: +1
+  switch (plane) {
+    case SketchPlane::XY: return 1;
+    case SketchPlane::XZ: return -1;
+    case SketchPlane::YZ: return 1;
+  }
+  return 1;
+}
+
 bool pointInTriangle(glm::vec2 pt, glm::vec2 a, glm::vec2 b, glm::vec2 c) {
   const float d1 = cross2D(b - a, pt - a);
   const float d2 = cross2D(c - b, pt - b);
@@ -108,6 +119,7 @@ StlMesh extrudeMesh(const std::vector<std::vector<glm::vec2>>& profiles,
                     const std::vector<std::vector<glm::vec2>>& holeProfiles) {
   const glm::vec3 normal = planeNormal(plane);
   const glm::vec3 offset = normal * distanceMm;
+  const int windingSign = planeWindingSign(plane);
 
   std::vector<StlVertex> vertices;
   std::vector<uint32_t> indices;
@@ -126,9 +138,11 @@ StlMesh extrudeMesh(const std::vector<std::vector<glm::vec2>>& profiles,
 
     const auto tris = earClip(profile);
 
-    // Front cap (faces away from extrude direction).  Skip triangles whose
+    // Front cap (faces away from extrude direction). Skip triangles whose
     // centroids fall inside any hole polygon contained by this profile.
     const glm::vec3 frontN = (distanceMm >= 0.0f) ? -normal : normal;
+    const int frontDirSign = (distanceMm >= 0.0f) ? -1 : 1;
+    const bool frontUseCcw = (windingSign == frontDirSign);
     for (const auto& tri : tris) {
       const glm::vec2 triCenter = (profile[tri[0]] + profile[tri[1]] + profile[tri[2]]) / 3.0f;
       bool inHole = false;
@@ -143,16 +157,23 @@ StlMesh extrudeMesh(const std::vector<std::vector<glm::vec2>>& profiles,
       if (inHole) continue;
 
       const auto base = static_cast<uint32_t>(vertices.size());
-      vertices.push_back({front[tri[0]], frontN});
-      vertices.push_back({front[tri[1]], frontN});
-      vertices.push_back({front[tri[2]], frontN});
+      if (frontUseCcw) {
+        vertices.push_back({front[tri[0]], frontN});
+        vertices.push_back({front[tri[1]], frontN});
+        vertices.push_back({front[tri[2]], frontN});
+      } else {
+        vertices.push_back({front[tri[2]], frontN});
+        vertices.push_back({front[tri[1]], frontN});
+        vertices.push_back({front[tri[0]], frontN});
+      }
       indices.push_back(base);
       indices.push_back(base + 1);
       indices.push_back(base + 2);
     }
 
-    // Back cap (reversed winding).
+    // Back cap with opposite outward winding from front cap.
     const glm::vec3 backN = -frontN;
+    const bool backUseCcw = !frontUseCcw;
     for (const auto& tri : tris) {
       const glm::vec2 triCenter = (profile[tri[0]] + profile[tri[1]] + profile[tri[2]]) / 3.0f;
       bool inHole = false;
@@ -167,9 +188,15 @@ StlMesh extrudeMesh(const std::vector<std::vector<glm::vec2>>& profiles,
       if (inHole) continue;
 
       const auto base = static_cast<uint32_t>(vertices.size());
-      vertices.push_back({back[tri[2]], backN});
-      vertices.push_back({back[tri[1]], backN});
-      vertices.push_back({back[tri[0]], backN});
+      if (backUseCcw) {
+        vertices.push_back({back[tri[0]], backN});
+        vertices.push_back({back[tri[1]], backN});
+        vertices.push_back({back[tri[2]], backN});
+      } else {
+        vertices.push_back({back[tri[2]], backN});
+        vertices.push_back({back[tri[1]], backN});
+        vertices.push_back({back[tri[0]], backN});
+      }
       indices.push_back(base);
       indices.push_back(base + 1);
       indices.push_back(base + 2);
