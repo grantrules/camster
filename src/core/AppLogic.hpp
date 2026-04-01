@@ -47,6 +47,8 @@ void createSketch(AppState* app, int planeId);
 void createOffsetPlaneFromPlane(AppState* app, int parentPlaneId, float distanceMm);
 void createOffsetPlaneFromFace(AppState* app, int sourceObjectIndex,
                                SketchPlane plane, int faceSign, float distanceMm);
+void createReferencePointFromSelection(AppState* app);
+void createReferenceAxisFromSelection(AppState* app);
 void appendSceneObject(AppState* app, StlMesh mesh);
 void clearSceneObjects(AppState* app);
 
@@ -75,6 +77,8 @@ bool applyAddExtrude(AppState* app, const StlMesh& extruded,
                      const std::vector<int>& targetsRaw);
 bool applyAddCombine(AppState* app, const std::vector<int>& targetsRaw,
                      const std::vector<int>& toolsRaw, bool keepTools);
+bool applyIntersectCombine(AppState* app, const std::vector<int>& targetsRaw,
+                          const std::vector<int>& toolsRaw, bool keepTools);
 bool applySubtractExtrude(AppState* app, const StlMesh& extruded,
                           const std::vector<int>& targetsRaw);
 bool applySubtractCombine(AppState* app, const std::vector<int>& targetsRaw,
@@ -82,6 +86,10 @@ bool applySubtractCombine(AppState* app, const std::vector<int>& targetsRaw,
 bool applyChamferEdges(AppState* app, int objectIndex,
                        const std::vector<ChamferEdgeSelection>& edges,
                        float distanceMm);
+bool applyFilletEdges(AppState* app, int objectIndex,
+                      const std::vector<ChamferEdgeSelection>& edges,
+                      float radiusMm);
+bool applyDraftObject(AppState* app, int objectIndex, float angleDegrees);
 
 int pickObject(const AppState& app, glm::vec3 rayO, glm::vec3 rayD);
 std::optional<FacePickResult> pickObjectFace(const AppState& app, glm::vec3 rayO, glm::vec3 rayD);

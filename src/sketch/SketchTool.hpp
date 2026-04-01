@@ -10,7 +10,7 @@
 #include "Scene.hpp"
 #include "sketch/Primitive.hpp"
 
-enum class Tool { None, Line, Rectangle, Circle, Arc };
+enum class Tool { None, Line, Polyline, Rectangle, Circle, Arc };
 
 // Manages the interactive state of the active drawing tool.  Each tool is a
 // small state machine driven by mouse clicks and optional dimension input.

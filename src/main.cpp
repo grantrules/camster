@@ -331,6 +331,18 @@ int main() {
       app.status = "Exited sketch mode";
     }
 
+    auto recordActiveSketchEdit = [&app]() {
+      if (!app.hasActiveSketch()) return;
+      EditSketchAction action;
+      action.sketchIndex = app.activeSketchIndex;
+      action.sketchName = std::string(app.activeSketchMeta().name.data());
+      action.elements = app.activeSketch().elements();
+      action.constraints = app.activeSketch().constraints();
+      app.timeline.push(std::move(action),
+                        "Edit " + std::string(app.activeSketchMeta().name.data()));
+      app.timelineCursor = app.timeline.size() - 1;
+    };
+
     // Handle "Extrude" button press: gather profiles from selection.
     if (toolbarAction.extrudeRequested && !app.extrudeTool.active() && app.hasActiveSketch()) {
       if (!app.activeSketchVisible()) {
@@ -377,6 +389,7 @@ int main() {
       } else {
         app.activeSketch().deleteSelected();
         app.status = "Deleted selected elements";
+        recordActiveSketchEdit();
       }
     }
 
@@ -389,6 +402,7 @@ int main() {
           app.activeSketch().toggleConstruction(idx);
         }
         app.status = "Toggled construction";
+        recordActiveSketchEdit();
       }
     }
 
@@ -417,6 +431,13 @@ int main() {
       if (valueMm >= 0.0f) {
         app.status = sketch.applyConstraintToSelection(
             toolbarAction.constraintRequested, valueMm);
+        const auto diag = sketch.constraintDiagnostics();
+        if (diag.overConstrainedCount > 0) {
+          app.status += " (warning: over-constrained elements)";
+        } else if (diag.duplicateConstraintCount > 0) {
+          app.status += " (warning: duplicate constraints)";
+        }
+        recordActiveSketchEdit();
       }
       }
     }
@@ -610,10 +631,16 @@ int main() {
                         view, proj, rayO, rayD);
 
             const int hit = pickObject(app, rayO, rayD);
-            if (app.objectPickMode == ObjectPickMode::ChamferEdges) {
-              const int obj = app.chamferOptions.targetObject >= 0
-                                  ? app.chamferOptions.targetObject
-                                  : app.selectedObject;
+            if (app.objectPickMode == ObjectPickMode::ChamferEdges ||
+                app.objectPickMode == ObjectPickMode::FilletEdges) {
+              const bool filletMode = app.objectPickMode == ObjectPickMode::FilletEdges;
+              const int obj = filletMode
+                                  ? (app.filletOptions.targetObject >= 0
+                                         ? app.filletOptions.targetObject
+                                         : app.selectedObject)
+                                  : (app.chamferOptions.targetObject >= 0
+                                         ? app.chamferOptions.targetObject
+                                         : app.selectedObject);
               const EdgePickResult edgePick = pickChamferEdge(app, obj, rayO, rayD);
               if (edgePick.hit) {
                 auto sameEdge = [](const ChamferEdgeSelection& lhs,
@@ -627,19 +654,19 @@ int main() {
                           (near(lhs.a, rhs.b) && near(lhs.b, rhs.a)));
                 };
 
+                auto& selectedEdges = filletMode ? app.filletOptions.edges : app.chamferOptions.edges;
                 bool removed = false;
-                for (auto it = app.chamferOptions.edges.begin();
-                     it != app.chamferOptions.edges.end(); ++it) {
+                for (auto it = selectedEdges.begin(); it != selectedEdges.end(); ++it) {
                   if (sameEdge(*it, edgePick.edge)) {
-                    app.chamferOptions.edges.erase(it);
+                    selectedEdges.erase(it);
                     removed = true;
-                    app.status = "Chamfer edge removed";
+                    app.status = filletMode ? "Fillet edge removed" : "Chamfer edge removed";
                     break;
                   }
                 }
                 if (!removed) {
-                  app.chamferOptions.edges.push_back(edgePick.edge);
-                  app.status = "Chamfer edge selected";
+                  selectedEdges.push_back(edgePick.edge);
+                  app.status = filletMode ? "Fillet edge selected" : "Chamfer edge selected";
                 }
               }
             } else if (hit >= 0) {
@@ -799,6 +826,7 @@ int main() {
           app.sketchTool.setTool(Tool::None);
         }
         if (ImGui::MenuItem("Line", nullptr, false, sketchUnlocked)) app.sketchTool.setTool(Tool::Line);
+        if (ImGui::MenuItem("Polyline", nullptr, false, sketchUnlocked)) app.sketchTool.setTool(Tool::Polyline);
         if (ImGui::MenuItem("Rectangle", nullptr, false, sketchUnlocked)) app.sketchTool.setTool(Tool::Rectangle);
         if (ImGui::MenuItem("Circle", nullptr, false, sketchUnlocked)) app.sketchTool.setTool(Tool::Circle);
         if (ImGui::MenuItem("Arc", nullptr, false, sketchUnlocked)) app.sketchTool.setTool(Tool::Arc);
@@ -808,20 +836,25 @@ int main() {
           for (size_t idx : app.activeSketch().selectedIndices()) {
             app.activeSketch().toggleConstruction(idx);
           }
+          recordActiveSketchEdit();
         }
         if (ImGui::MenuItem("Delete", "Del", false, hasSel)) {
           app.activeSketch().deleteSelected();
           app.status = "Deleted selected elements";
+          recordActiveSketchEdit();
         }
         ImGui::Separator();
         if (ImGui::MenuItem("Horizontal", nullptr, false, hasSel)) {
           app.activeSketch().applyConstraintToSelection(ConstraintTool::Horizontal, 0.0f);
+          recordActiveSketchEdit();
         }
         if (ImGui::MenuItem("Vertical", nullptr, false, hasSel)) {
           app.activeSketch().applyConstraintToSelection(ConstraintTool::Vertical, 0.0f);
+          recordActiveSketchEdit();
         }
         if (ImGui::MenuItem("Fixed", nullptr, false, hasSel)) {
           app.activeSketch().applyConstraintToSelection(ConstraintTool::Fixed, 0.0f);
+          recordActiveSketchEdit();
         }
         ImGui::EndPopup();
       }
@@ -830,7 +863,8 @@ int main() {
     // Consume completed sketch primitives.
     if (app.hasActiveSketch()) {
       if (auto prim = app.sketchTool.takeResult()) {
-      app.activeSketch().addCompletedPrimitive(std::move(*prim));
+        app.activeSketch().addCompletedPrimitive(std::move(*prim));
+        recordActiveSketchEdit();
       }
     }
 
@@ -979,12 +1013,44 @@ int main() {
       }
     }
 
+    for (int i = 0; i < static_cast<int>(app.referenceAxes.size()); ++i) {
+      const auto& axis = app.referenceAxes[i];
+      if (!axis.meta.visible) continue;
+      const glm::vec4 color = hasIndex(app.browserSelectedAxes, i)
+                                  ? glm::vec4(1.0f, 0.85f, 0.2f, 1.0f)
+                                  : glm::vec4(0.9f, 0.35f, 0.2f, 0.9f);
+      const glm::vec3 dir = glm::normalize(axis.direction);
+      const glm::vec3 a = axis.origin - dir * axis.displayLengthMm * 0.5f;
+      const glm::vec3 b = axis.origin + dir * axis.displayLengthMm * 0.5f;
+      allLines.push_back({a, color});
+      allLines.push_back({b, color});
+    }
+
+    for (int i = 0; i < static_cast<int>(app.referencePoints.size()); ++i) {
+      const auto& point = app.referencePoints[i];
+      if (!point.meta.visible) continue;
+      const glm::vec4 color = hasIndex(app.browserSelectedPoints, i)
+                                  ? glm::vec4(1.0f, 0.85f, 0.2f, 1.0f)
+                                  : glm::vec4(0.2f, 0.9f, 0.9f, 0.9f);
+      constexpr float kPointSize = 2.5f;
+      allLines.push_back({point.position + glm::vec3(-kPointSize, 0.0f, 0.0f), color});
+      allLines.push_back({point.position + glm::vec3(kPointSize, 0.0f, 0.0f), color});
+      allLines.push_back({point.position + glm::vec3(0.0f, -kPointSize, 0.0f), color});
+      allLines.push_back({point.position + glm::vec3(0.0f, kPointSize, 0.0f), color});
+      allLines.push_back({point.position + glm::vec3(0.0f, 0.0f, -kPointSize), color});
+      allLines.push_back({point.position + glm::vec3(0.0f, 0.0f, kPointSize), color});
+    }
+
     app.renderer.setLines(allLines);
 
     drawPanel(&app);
     drawObjectBrowserWindow(&app);
     drawTimelineWindow(&app);
     drawSolidExtrudeWindow(&app);
+    drawRevolveWindow(&app);
+    drawSweepWindow(&app);
+    drawLoftWindow(&app);
+    drawShellWindow(&app);
     drawNewPlaneWindow(&app);
     drawNewSketchWindow(&app);
     drawProjectToolWindow(&app);
@@ -993,6 +1059,8 @@ int main() {
     drawExtrudeOptionsWindow(&app);
     drawCombineWindow(&app);
     drawChamferWindow(&app);
+    drawFilletWindow(&app);
+    drawDraftWindow(&app);
 
     // --- File browser (modal — drawn every frame while visible) ---
     if (app.fileBrowser.isVisible()) {

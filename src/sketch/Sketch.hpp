@@ -15,6 +15,16 @@ struct SketchDimensionLabel {
   std::string text;
 };
 
+struct SketchConstraintDiagnostics {
+  int unconstrainedCount = 0;
+  int underConstrainedCount = 0;
+  int fullyConstrainedCount = 0;
+  int overConstrainedCount = 0;
+  int totalConstraints = 0;
+  int duplicateConstraintCount = 0;
+  std::vector<std::string> issues;
+};
+
 // A Sketch is an ordered collection of 2D elements (primitives + metadata)
 // that live on a single plane.  It manages constraints, DOF tracking, and
 // selection, and can tessellate everything to colored line segments.
@@ -46,6 +56,7 @@ class Sketch {
   // For dimensional constraints, `valueMm` must be set (length/radius in mm,
   // angle in degrees).  Returns a status message describing what happened.
   std::string applyConstraintToSelection(ConstraintTool tool, float valueMm = 0.0f);
+  SketchConstraintDiagnostics constraintDiagnostics() const;
 
   // --- Selection ---
   void select(size_t idx);

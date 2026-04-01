@@ -1,6 +1,7 @@
 #include "ui/UIWindows.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstdio>
 #include <cmath>
 #include <string>
@@ -309,6 +310,8 @@ void drawMenuBar(AppState* app) {
       exitSketchMode(app);
       clearSketches(app);
       initializeDefaultPlanes(app);
+      app->timeline.clear();
+      app->timelineCursor = -1;
       app->extrudeTool.cancel();
       app->sketchCreate = {};
       app->planeCreate = {};
@@ -398,6 +401,23 @@ void drawMenuBar(AppState* app) {
       app->objectPickMode = ObjectPickMode::None;
       app->status = "Combine tool opened";
     }
+    const bool canDraft = app->sceneMode == SceneMode::View3D && app->selectedObject >= 0;
+    if (ImGui::MenuItem("Draft...", nullptr, false, canDraft)) {
+      app->draftOptions.visible = true;
+      app->draftOptions.targetObject = app->selectedObject;
+      std::snprintf(app->draftOptions.angleBuffer,
+                    sizeof(app->draftOptions.angleBuffer), "2.000");
+      app->status = "Draft tool opened";
+    }
+    const bool canReference = app->sceneMode == SceneMode::View3D;
+    if (ImGui::MenuItem("Create Reference Point", nullptr, false, canReference)) {
+      createReferencePointFromSelection(app);
+      app->status = "Reference point created";
+    }
+    if (ImGui::MenuItem("Create Reference Axis", nullptr, false, canReference)) {
+      createReferenceAxisFromSelection(app);
+      app->status = "Reference axis created";
+    }
     ImGui::EndMenu();
   }
 
@@ -443,6 +463,18 @@ void drawSolidToolbar(AppState* app) {
   }
 
   ImGui::SameLine();
+  if (ImGui::Button("Axis")) {
+    createReferenceAxisFromSelection(app);
+    app->status = "Reference axis created";
+  }
+
+  ImGui::SameLine();
+  if (ImGui::Button("Point")) {
+    createReferencePointFromSelection(app);
+    app->status = "Reference point created";
+  }
+
+  ImGui::SameLine();
   const bool hasSketch = !app->sketches.empty();
   if (!hasSketch) ImGui::BeginDisabled();
   if (ImGui::Button("Extrude")) {
@@ -457,6 +489,45 @@ void drawSolidToolbar(AppState* app) {
     app->status = "3D Extrude: pick closed profiles; uncheck inner loops to create holes";
   }
   if (!hasSketch) ImGui::EndDisabled();
+
+  ImGui::SameLine();
+  if (!hasSketch) ImGui::BeginDisabled();
+  if (ImGui::Button("Revolve")) {
+    app->revolveOptions.visible = true;
+    app->revolveOptions.sourceSketch = app->browserSelectedSketches.empty()
+                                           ? (static_cast<int>(app->sketches.size()) - 1)
+                                           : app->browserSelectedSketches.front();
+    app->revolveOptions.axisMode = 0;
+    std::snprintf(app->revolveOptions.angleBuffer,
+                  sizeof(app->revolveOptions.angleBuffer), "360.000");
+    app->status = "Revolve tool opened";
+  }
+  if (!hasSketch) ImGui::EndDisabled();
+
+  ImGui::SameLine();
+  if (!hasSketch) ImGui::BeginDisabled();
+  if (ImGui::Button("Sweep")) {
+    app->sweepOptions.visible = true;
+    app->sweepOptions.sourceSketch = app->browserSelectedSketches.empty()
+                                         ? (static_cast<int>(app->sketches.size()) - 1)
+                                         : app->browserSelectedSketches.front();
+    app->sweepOptions.axisMode = 2;
+    std::snprintf(app->sweepOptions.distanceBuffer,
+                  sizeof(app->sweepOptions.distanceBuffer), "10.000");
+    app->status = "Sweep tool opened";
+  }
+  if (!hasSketch) ImGui::EndDisabled();
+
+  ImGui::SameLine();
+  if (app->sketches.size() < 2) ImGui::BeginDisabled();
+  if (ImGui::Button("Loft")) {
+    app->loftOptions.visible = true;
+    app->loftOptions.sourceSketchA = app->browserSelectedSketches.empty() ? 0 : app->browserSelectedSketches.front();
+    app->loftOptions.sourceSketchB = std::min(app->loftOptions.sourceSketchA + 1,
+                                              static_cast<int>(app->sketches.size()) - 1);
+    app->status = "Loft tool opened";
+  }
+  if (app->sketches.size() < 2) ImGui::EndDisabled();
 
   ImGui::SameLine();
   const bool canCombine = app->sceneObjects.size() >= 2;
@@ -487,6 +558,42 @@ void drawSolidToolbar(AppState* app) {
     app->objectPickMode = ObjectPickMode::ChamferEdges;
     app->chamferOptions.pickEdges = true;
     app->status = "Chamfer: click edges on the selected object";
+  }
+  if (!hasSelectedObject) ImGui::EndDisabled();
+
+  ImGui::SameLine();
+  if (!hasSelectedObject) ImGui::BeginDisabled();
+  if (ImGui::Button("Fillet")) {
+    app->filletOptions.visible = true;
+    app->filletOptions.targetObject = app->selectedObject;
+    app->filletOptions.edges.clear();
+    std::snprintf(app->filletOptions.radiusBuffer,
+                  sizeof(app->filletOptions.radiusBuffer), "1.000");
+    app->objectPickMode = ObjectPickMode::FilletEdges;
+    app->filletOptions.pickEdges = true;
+    app->status = "Fillet: click edges on the selected object";
+  }
+  if (!hasSelectedObject) ImGui::EndDisabled();
+
+  ImGui::SameLine();
+  if (!hasSelectedObject) ImGui::BeginDisabled();
+  if (ImGui::Button("Draft")) {
+    app->draftOptions.visible = true;
+    app->draftOptions.targetObject = app->selectedObject;
+    std::snprintf(app->draftOptions.angleBuffer,
+                  sizeof(app->draftOptions.angleBuffer), "2.000");
+    app->status = "Draft: positive tapers inward along +Z";
+  }
+  if (!hasSelectedObject) ImGui::EndDisabled();
+
+  ImGui::SameLine();
+  if (!hasSelectedObject) ImGui::BeginDisabled();
+  if (ImGui::Button("Shell")) {
+    app->shellOptions.visible = true;
+    app->shellOptions.targetObject = app->selectedObject;
+    std::snprintf(app->shellOptions.thicknessBuffer,
+                  sizeof(app->shellOptions.thicknessBuffer), "1.000");
+    app->status = "Shell tool opened";
   }
   if (!hasSelectedObject) ImGui::EndDisabled();
 
@@ -790,6 +897,23 @@ void drawPanel(AppState* app) {
   ImGui::TextWrapped("LMB drag: rotate");
   ImGui::TextWrapped("Mouse wheel: zoom");
   ImGui::TextWrapped("Triangles: %d", static_cast<int>(app->mesh.indices().size() / 3));
+
+  if (app->sceneMode == SceneMode::Sketch && app->hasActiveSketch()) {
+    const auto diag = app->activeSketch().constraintDiagnostics();
+    ImGui::Separator();
+    ImGui::TextWrapped("Sketch Diagnostics");
+    ImGui::TextWrapped("Elements: U:%d  u:%d  F:%d  O:%d",
+                       diag.unconstrainedCount,
+                       diag.underConstrainedCount,
+                       diag.fullyConstrainedCount,
+                       diag.overConstrainedCount);
+    ImGui::TextWrapped("Constraints: %d (duplicates: %d)",
+                       diag.totalConstraints,
+                       diag.duplicateConstraintCount);
+    for (size_t i = 0; i < diag.issues.size() && i < 3; ++i) {
+      ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.2f, 1.0f), "- %s", diag.issues[i].c_str());
+    }
+  }
 
   ImGui::Separator();
 
@@ -1233,6 +1357,62 @@ void drawObjectBrowserWindow(AppState* app) {
                app->activeSketchIndex + 1 < static_cast<int>(app->sketches.size())) {
       ImGui::TextDisabled("Future sketches are hidden while editing this sketch");
     }
+  }
+
+  if (ImGui::CollapsingHeader("Axes", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ImGui::BeginTable("##axesTable", 2,
+                          ImGuiTableFlags_RowBg |
+                              ImGuiTableFlags_BordersInnerV |
+                              ImGuiTableFlags_SizingStretchProp)) {
+      ImGui::TableSetupColumn("V", ImGuiTableColumnFlags_WidthFixed, 28.0f);
+      ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableHeadersRow();
+      for (int i = 0; i < static_cast<int>(app->referenceAxes.size()); ++i) {
+        auto& axis = app->referenceAxes[i];
+        const bool selected = hasIndex(app->browserSelectedAxes, i);
+        ImGui::TableNextRow();
+        ImGui::PushID(3000 + i);
+        ImGui::TableSetColumnIndex(0);
+        visibilityIconToggle("##axvis", &axis.meta.visible);
+        ImGui::TableSetColumnIndex(1);
+        if (ImGui::Selectable(axis.meta.name.data(), selected, ImGuiSelectableFlags_SpanAllColumns)) {
+          setSingleOrMultiSelection(app->browserSelectedAxes, i, multiSelect);
+          app->axisSelectionAnchor = i;
+          app->browserFocusSection = BrowserSection::Axes;
+        }
+        ImGui::PopID();
+      }
+      ImGui::EndTable();
+    }
+    if (app->referenceAxes.empty()) ImGui::TextDisabled("(no axes)");
+  }
+
+  if (ImGui::CollapsingHeader("Points", ImGuiTreeNodeFlags_DefaultOpen)) {
+    if (ImGui::BeginTable("##pointsTable", 2,
+                          ImGuiTableFlags_RowBg |
+                              ImGuiTableFlags_BordersInnerV |
+                              ImGuiTableFlags_SizingStretchProp)) {
+      ImGui::TableSetupColumn("V", ImGuiTableColumnFlags_WidthFixed, 28.0f);
+      ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+      ImGui::TableHeadersRow();
+      for (int i = 0; i < static_cast<int>(app->referencePoints.size()); ++i) {
+        auto& point = app->referencePoints[i];
+        const bool selected = hasIndex(app->browserSelectedPoints, i);
+        ImGui::TableNextRow();
+        ImGui::PushID(4000 + i);
+        ImGui::TableSetColumnIndex(0);
+        visibilityIconToggle("##ptvis", &point.meta.visible);
+        ImGui::TableSetColumnIndex(1);
+        if (ImGui::Selectable(point.meta.name.data(), selected, ImGuiSelectableFlags_SpanAllColumns)) {
+          setSingleOrMultiSelection(app->browserSelectedPoints, i, multiSelect);
+          app->pointSelectionAnchor = i;
+          app->browserFocusSection = BrowserSection::Points;
+        }
+        ImGui::PopID();
+      }
+      ImGui::EndTable();
+    }
+    if (app->referencePoints.empty()) ImGui::TextDisabled("(no points)");
   }
 
   if (browserFocused && !ImGui::IsAnyItemActive()) {
@@ -1701,6 +1881,165 @@ void drawExtrudeOptionsWindow(AppState* app) {
   }
 }
 
+void drawRevolveWindow(AppState* app) {
+  if (!app->revolveOptions.visible) return;
+  ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                          ImVec2(0.5f, 0.5f));
+  ImGui::SetNextWindowSize(ImVec2(420.0f, 0.0f), ImGuiCond_FirstUseEver);
+  bool open = app->revolveOptions.visible;
+  if (ImGui::Begin("Revolve Tool", &open)) {
+    std::vector<const char*> names;
+    for (const auto& sk : app->sketches) names.push_back(sk.meta.name.data());
+    int idx = std::clamp(app->revolveOptions.sourceSketch, 0,
+                         std::max(0, static_cast<int>(app->sketches.size()) - 1));
+    ImGui::Combo("Source Sketch", &idx, names.data(), static_cast<int>(names.size()));
+    app->revolveOptions.sourceSketch = idx;
+    ImGui::Combo("Axis", &app->revolveOptions.axisMode, "Sketch X\0Sketch Y\0");
+    ImGui::InputText("Angle", app->revolveOptions.angleBuffer, sizeof(app->revolveOptions.angleBuffer));
+    if (ImGui::Button("Apply Revolve")) {
+      char* endPtr = nullptr;
+      const float angle = std::strtof(app->revolveOptions.angleBuffer, &endPtr);
+      const auto& sk = app->sketches[idx];
+      StlMesh mesh = revolveMesh(sk.sketch.closedProfiles(), sk.plane, sk.offsetMm,
+                                 app->revolveOptions.axisMode, angle);
+      if (endPtr == app->revolveOptions.angleBuffer || mesh.empty() || !applyAddExtrude(app, mesh, {})) {
+        app->status = "Revolve failed";
+      } else {
+        SolidFeatureAction action;
+        action.featureName = "Revolve";
+        action.sourceNames = {std::string(sk.meta.name.data())};
+        action.resultObjectName = objectName(app, static_cast<int>(app->sceneObjects.size()) - 1);
+        app->timeline.push(std::move(action), "Revolve");
+        app->timelineCursor = app->timeline.size() - 1;
+        app->status = "Revolve complete";
+        app->revolveOptions.visible = false;
+      }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Close")) app->revolveOptions.visible = false;
+  }
+  ImGui::End();
+  app->revolveOptions.visible = open;
+}
+
+void drawSweepWindow(AppState* app) {
+  if (!app->sweepOptions.visible) return;
+  ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                          ImVec2(0.5f, 0.5f));
+  ImGui::SetNextWindowSize(ImVec2(420.0f, 0.0f), ImGuiCond_FirstUseEver);
+  bool open = app->sweepOptions.visible;
+  if (ImGui::Begin("Sweep Tool", &open)) {
+    std::vector<const char*> names;
+    for (const auto& sk : app->sketches) names.push_back(sk.meta.name.data());
+    int idx = std::clamp(app->sweepOptions.sourceSketch, 0,
+                         std::max(0, static_cast<int>(app->sketches.size()) - 1));
+    ImGui::Combo("Source Sketch", &idx, names.data(), static_cast<int>(names.size()));
+    app->sweepOptions.sourceSketch = idx;
+    ImGui::Combo("Direction", &app->sweepOptions.axisMode, "World X\0World Y\0World Z\0");
+    ImGui::InputText("Distance", app->sweepOptions.distanceBuffer, sizeof(app->sweepOptions.distanceBuffer));
+    if (ImGui::Button("Apply Sweep")) {
+      auto parsed = parseDimension(std::string(app->sweepOptions.distanceBuffer), app->project.defaultUnit);
+      const auto& sk = app->sketches[idx];
+      StlMesh mesh = parsed ? sweepMesh(sk.sketch.closedProfiles(), sk.plane, sk.offsetMm,
+                                        app->sweepOptions.axisMode, parsed->valueMm) : StlMesh();
+      if (mesh.empty() || !applyAddExtrude(app, mesh, {})) {
+        app->status = "Sweep failed";
+      } else {
+        SolidFeatureAction action;
+        action.featureName = "Sweep";
+        action.sourceNames = {std::string(sk.meta.name.data())};
+        action.resultObjectName = objectName(app, static_cast<int>(app->sceneObjects.size()) - 1);
+        app->timeline.push(std::move(action), "Sweep");
+        app->timelineCursor = app->timeline.size() - 1;
+        app->status = "Sweep complete";
+        app->sweepOptions.visible = false;
+      }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Close")) app->sweepOptions.visible = false;
+  }
+  ImGui::End();
+  app->sweepOptions.visible = open;
+}
+
+void drawLoftWindow(AppState* app) {
+  if (!app->loftOptions.visible) return;
+  ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                          ImVec2(0.5f, 0.5f));
+  ImGui::SetNextWindowSize(ImVec2(420.0f, 0.0f), ImGuiCond_FirstUseEver);
+  bool open = app->loftOptions.visible;
+  if (ImGui::Begin("Loft Tool", &open)) {
+    std::vector<const char*> names;
+    for (const auto& sk : app->sketches) names.push_back(sk.meta.name.data());
+    int a = std::clamp(app->loftOptions.sourceSketchA, 0,
+                       std::max(0, static_cast<int>(app->sketches.size()) - 1));
+    int b = std::clamp(app->loftOptions.sourceSketchB, 0,
+                       std::max(0, static_cast<int>(app->sketches.size()) - 1));
+    ImGui::Combo("Source Sketch A", &a, names.data(), static_cast<int>(names.size()));
+    ImGui::Combo("Source Sketch B", &b, names.data(), static_cast<int>(names.size()));
+    app->loftOptions.sourceSketchA = a;
+    app->loftOptions.sourceSketchB = b;
+    if (ImGui::Button("Apply Loft")) {
+      const auto& skA = app->sketches[a];
+      const auto& skB = app->sketches[b];
+      StlMesh mesh = loftMesh(skA.sketch.closedProfiles(), skA.plane, skA.offsetMm,
+                              skB.sketch.closedProfiles(), skB.plane, skB.offsetMm);
+      if (a == b || mesh.empty() || !applyAddExtrude(app, mesh, {})) {
+        app->status = "Loft failed";
+      } else {
+        SolidFeatureAction action;
+        action.featureName = "Loft";
+        action.sourceNames = {std::string(skA.meta.name.data()), std::string(skB.meta.name.data())};
+        action.resultObjectName = objectName(app, static_cast<int>(app->sceneObjects.size()) - 1);
+        app->timeline.push(std::move(action), "Loft");
+        app->timelineCursor = app->timeline.size() - 1;
+        app->status = "Loft complete";
+        app->loftOptions.visible = false;
+      }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Close")) app->loftOptions.visible = false;
+  }
+  ImGui::End();
+  app->loftOptions.visible = open;
+}
+
+void drawShellWindow(AppState* app) {
+  if (!app->shellOptions.visible) return;
+  ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                          ImVec2(0.5f, 0.5f));
+  ImGui::SetNextWindowSize(ImVec2(420.0f, 0.0f), ImGuiCond_FirstUseEver);
+  bool open = app->shellOptions.visible;
+  if (ImGui::Begin("Shell Tool", &open)) {
+    ImGui::Text("Target: %s", objectName(app, app->shellOptions.targetObject).c_str());
+    ImGui::InputText("Thickness", app->shellOptions.thicknessBuffer,
+                     sizeof(app->shellOptions.thicknessBuffer));
+    if (ImGui::Button("Apply Shell")) {
+      auto parsed = parseDimension(std::string(app->shellOptions.thicknessBuffer), app->project.defaultUnit);
+      StlMesh mesh = parsed && app->shellOptions.targetObject >= 0 &&
+                             app->shellOptions.targetObject < static_cast<int>(app->sceneObjects.size())
+                         ? shellMesh(app->sceneObjects[app->shellOptions.targetObject], parsed->valueMm)
+                         : StlMesh();
+      if (mesh.empty() || !applyAddExtrude(app, mesh, {})) {
+        app->status = "Shell failed";
+      } else {
+        SolidFeatureAction action;
+        action.featureName = "Shell";
+        action.sourceNames = {objectName(app, app->shellOptions.targetObject)};
+        action.resultObjectName = objectName(app, static_cast<int>(app->sceneObjects.size()) - 1);
+        app->timeline.push(std::move(action), "Shell");
+        app->timelineCursor = app->timeline.size() - 1;
+        app->status = "Shell complete";
+        app->shellOptions.visible = false;
+      }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Close")) app->shellOptions.visible = false;
+  }
+  ImGui::End();
+  app->shellOptions.visible = open;
+}
+
 void drawCombineWindow(AppState* app) {
   if (!app->combineOptions.visible) return;
 
@@ -1710,7 +2049,7 @@ void drawCombineWindow(AppState* app) {
   bool open = app->combineOptions.visible;
   if (ImGui::Begin("Combine Tool", &open)) {
     int op = static_cast<int>(app->combineOptions.operation);
-    if (ImGui::Combo("Operation", &op, "Add\0Subtract\0")) {
+    if (ImGui::Combo("Operation", &op, "Add\0Subtract\0Intersect\0")) {
       app->combineOptions.operation = static_cast<BooleanOp>(op);
     }
     ImGui::Checkbox("Keep Tools", &app->combineOptions.keepTools);
@@ -1723,12 +2062,13 @@ void drawCombineWindow(AppState* app) {
                             ObjectPickMode::CombineTools, app);
 
     ImGui::Separator();
-    ImGui::TextDisabled("Subtract currently uses object-overlap fallback");
-    ImGui::TextDisabled("(removes overlapping targets by AABB)");
+    ImGui::TextDisabled("Subtract/Intersect use object-overlap fallback");
+    ImGui::TextDisabled("(AABB-based approximation)");
 
     ImGui::Separator();
     if (ImGui::Button("Apply")) {
       const bool subtract = (app->combineOptions.operation == BooleanOp::Subtract);
+      const bool intersect = (app->combineOptions.operation == BooleanOp::Intersect);
       auto targetNamesBefore = objectNames(app, app->combineOptions.targets);
       auto toolNamesBefore = objectNames(app, app->combineOptions.tools);
 
@@ -1741,7 +2081,9 @@ void drawCombineWindow(AppState* app) {
         ca.resultObjectName = objectName(
             app, static_cast<int>(app->sceneObjects.size()) - 1);
         app->timeline.push(std::move(ca),
-                           std::string(subtract ? "Subtract Combine" : "Add Combine"));
+                           std::string(subtract ? "Subtract Combine"
+                                                : (intersect ? "Intersect Combine"
+                                                             : "Add Combine")));
         app->timelineCursor = app->timeline.size() - 1;
       };
 
@@ -1753,6 +2095,15 @@ void drawCombineWindow(AppState* app) {
         } else {
           recordCombine();
           app->status = "Combine subtract complete (object-level)";
+        }
+      } else if (intersect) {
+        if (!applyIntersectCombine(app, app->combineOptions.targets,
+                                   app->combineOptions.tools,
+                                   app->combineOptions.keepTools)) {
+          app->status = "Combine intersect found no overlapping objects";
+        } else {
+          recordCombine();
+          app->status = "Combine intersect complete (AABB fallback)";
         }
       } else if (!applyAddCombine(app, app->combineOptions.targets,
                                   app->combineOptions.tools,
@@ -1865,4 +2216,136 @@ void drawChamferWindow(AppState* app) {
     app->objectPickMode = ObjectPickMode::None;
     app->chamferOptions.pickEdges = false;
   }
+}
+
+void drawFilletWindow(AppState* app) {
+  if (!app->filletOptions.visible) return;
+
+  ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                          ImVec2(0.5f, 0.5f));
+  ImGui::SetNextWindowSize(ImVec2(520.0f, 0.0f), ImGuiCond_FirstUseEver);
+  bool open = app->filletOptions.visible;
+  if (ImGui::Begin("Fillet Tool", &open)) {
+    const int obj = app->filletOptions.targetObject;
+    if (obj < 0 || obj >= static_cast<int>(app->sceneObjects.size())) {
+      ImGui::TextDisabled("No valid target object selected.");
+    } else {
+      ImGui::Text("Target: %s", app->sceneObjectMeta[obj].name.data());
+      ImGui::Text("Selected edges: %d", static_cast<int>(app->filletOptions.edges.size()));
+    }
+
+    ImGui::Text("Fillet Radius:");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(140.0f);
+    ImGui::InputText("##filletRadius", app->filletOptions.radiusBuffer,
+                     sizeof(app->filletOptions.radiusBuffer));
+    ImGui::SameLine();
+    ImGui::TextDisabled("(%s)", unitSuffix(app->project.defaultUnit));
+
+    if (ImGui::Button(app->filletOptions.pickEdges ? "Stop Edge Pick" : "Pick Edges")) {
+      app->filletOptions.pickEdges = !app->filletOptions.pickEdges;
+      app->objectPickMode = app->filletOptions.pickEdges ? ObjectPickMode::FilletEdges
+                                                         : ObjectPickMode::None;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Clear Edges")) {
+      app->filletOptions.edges.clear();
+    }
+
+    ImGui::Separator();
+    ImGui::BeginChild("##filletEdges", ImVec2(0.0f, 140.0f), true);
+    int eraseIdx = -1;
+    for (int i = 0; i < static_cast<int>(app->filletOptions.edges.size()); ++i) {
+      const auto& e = app->filletOptions.edges[i];
+      ImGui::PushID(i);
+      if (ImGui::SmallButton("x")) eraseIdx = i;
+      ImGui::SameLine();
+      ImGui::Text("Edge %d  (%.2f, %.2f, %.2f) -> (%.2f, %.2f, %.2f)", i + 1,
+                  e.a.x, e.a.y, e.a.z, e.b.x, e.b.y, e.b.z);
+      ImGui::PopID();
+    }
+    if (eraseIdx >= 0) {
+      app->filletOptions.edges.erase(app->filletOptions.edges.begin() + eraseIdx);
+    }
+    ImGui::EndChild();
+
+    ImGui::Separator();
+    if (ImGui::Button("Apply Fillet")) {
+      auto parsed = parseDimension(std::string(app->filletOptions.radiusBuffer),
+                                   app->project.defaultUnit);
+      if (!parsed) {
+        app->status = "Fillet: enter a valid radius";
+      } else if (!applyFilletEdges(app, app->filletOptions.targetObject,
+                                   app->filletOptions.edges, parsed->valueMm)) {
+        app->status = "Fillet failed (select edges on an unlocked object)";
+      } else {
+        app->status = "Fillet applied";
+        app->filletOptions.visible = false;
+        app->filletOptions.pickEdges = false;
+        app->objectPickMode = ObjectPickMode::None;
+      }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Close")) {
+      app->filletOptions.visible = false;
+      app->filletOptions.pickEdges = false;
+      if (app->objectPickMode == ObjectPickMode::FilletEdges) {
+        app->objectPickMode = ObjectPickMode::None;
+      }
+    }
+  }
+  ImGui::End();
+
+  app->filletOptions.visible = open;
+  if (!app->filletOptions.visible && app->objectPickMode == ObjectPickMode::FilletEdges) {
+    app->objectPickMode = ObjectPickMode::None;
+    app->filletOptions.pickEdges = false;
+  }
+}
+
+void drawDraftWindow(AppState* app) {
+  if (!app->draftOptions.visible) return;
+
+  ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing,
+                          ImVec2(0.5f, 0.5f));
+  ImGui::SetNextWindowSize(ImVec2(420.0f, 0.0f), ImGuiCond_FirstUseEver);
+  bool open = app->draftOptions.visible;
+  if (ImGui::Begin("Draft Tool", &open)) {
+    int obj = app->draftOptions.targetObject;
+    if (obj < 0 || obj >= static_cast<int>(app->sceneObjects.size())) {
+      obj = app->selectedObject;
+    }
+    if (obj >= 0 && obj < static_cast<int>(app->sceneObjects.size())) {
+      app->draftOptions.targetObject = obj;
+      ImGui::Text("Target: %s", app->sceneObjectMeta[obj].name.data());
+    } else {
+      ImGui::TextDisabled("No target object selected");
+    }
+
+    ImGui::Text("Draft Angle (deg):");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(140.0f);
+    ImGui::InputText("##draftAngle", app->draftOptions.angleBuffer,
+                     sizeof(app->draftOptions.angleBuffer));
+    ImGui::TextDisabled("Positive = inward taper toward +Z");
+
+    if (ImGui::Button("Apply Draft")) {
+      char* endPtr = nullptr;
+      const float degrees = std::strtof(app->draftOptions.angleBuffer, &endPtr);
+      if (endPtr == app->draftOptions.angleBuffer || !std::isfinite(degrees)) {
+        app->status = "Draft: enter a valid angle in degrees";
+      } else if (!applyDraftObject(app, app->draftOptions.targetObject, degrees)) {
+        app->status = "Draft failed (check target object and lock state)";
+      } else {
+        app->status = "Draft applied";
+        app->draftOptions.visible = false;
+      }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Close")) {
+      app->draftOptions.visible = false;
+    }
+  }
+  ImGui::End();
+  app->draftOptions.visible = open;
 }

@@ -66,6 +66,10 @@ Aabb meshAabb(const StlMesh& mesh) {
   return box;
 }
 
+glm::vec3 aabbCenter(const Aabb& box) {
+  return (box.min + box.max) * 0.5f;
+}
+
 bool aabbOverlap(const Aabb& a, const Aabb& b) {
   if (!a.valid || !b.valid) return false;
   return a.min.x <= b.max.x && a.max.x >= b.min.x &&
@@ -131,9 +135,15 @@ void restoreObjectSnapshot(AppState* app, ObjectEditSnapshot snapshot) {
   if (!app) return;
   app->sceneObjects = std::move(snapshot.sceneObjects);
   app->sceneObjectMeta = std::move(snapshot.sceneObjectMeta);
+  app->referenceAxes = std::move(snapshot.referenceAxes);
+  app->referencePoints = std::move(snapshot.referencePoints);
   app->selectedObject = snapshot.selectedObject;
   app->nextObjectNumber = snapshot.nextObjectNumber;
+  app->nextAxisNumber = snapshot.nextAxisNumber;
+  app->nextPointNumber = snapshot.nextPointNumber;
   app->browserSelectedObjects = std::move(snapshot.browserSelectedObjects);
+  app->browserSelectedAxes = std::move(snapshot.browserSelectedAxes);
+  app->browserSelectedPoints = std::move(snapshot.browserSelectedPoints);
   normalizeDeterministicAppState(app);
 }
 
@@ -540,6 +550,77 @@ void createOffsetPlaneFromFace(AppState* app, int sourceObjectIndex,
   app->planeSelectionAnchor = static_cast<int>(app->planes.size()) - 1;
 }
 
+void createReferencePointFromSelection(AppState* app) {
+  if (!app) return;
+  pushObjectUndoSnapshot(app);
+  ReferencePointEntry entry;
+  setName(entry.meta.name, "Point " + std::to_string(app->nextPointNumber++));
+  entry.meta.visible = true;
+  entry.meta.locked = false;
+
+  if (app->selectedObject >= 0 && app->selectedObject < static_cast<int>(app->sceneObjects.size())) {
+    const Aabb box = meshAabb(app->sceneObjects[app->selectedObject]);
+    if (box.valid) entry.position = aabbCenter(box);
+  } else if (!app->browserSelectedPlanes.empty()) {
+    const int planeIndex = app->browserSelectedPlanes.front();
+    if (planeIndex >= 0 && planeIndex < static_cast<int>(app->planes.size())) {
+      const ResolvedPlane resolved = resolvePlane(app, app->planes[planeIndex].id);
+      if (resolved.valid) entry.position = toWorld(glm::vec2(0.0f), resolved.plane, resolved.offsetMm);
+    }
+  }
+
+  ReferenceGeometryAction action;
+  action.geometryType = "Point";
+  action.name = entry.meta.name.data();
+  app->timeline.push(std::move(action), "Create " + std::string(entry.meta.name.data()));
+  app->timelineCursor = app->timeline.size() - 1;
+
+  app->referencePoints.push_back(entry);
+  app->browserSelectedPoints.assign(1, static_cast<int>(app->referencePoints.size()) - 1);
+  app->pointSelectionAnchor = static_cast<int>(app->referencePoints.size()) - 1;
+}
+
+void createReferenceAxisFromSelection(AppState* app) {
+  if (!app) return;
+  pushObjectUndoSnapshot(app);
+  ReferenceAxisEntry entry;
+  setName(entry.meta.name, "Axis " + std::to_string(app->nextAxisNumber++));
+  entry.meta.visible = true;
+  entry.meta.locked = false;
+  entry.displayLengthMm = 120.0f;
+
+  if (!app->browserSelectedPlanes.empty()) {
+    const int planeIndex = app->browserSelectedPlanes.front();
+    if (planeIndex >= 0 && planeIndex < static_cast<int>(app->planes.size())) {
+      const ResolvedPlane resolved = resolvePlane(app, app->planes[planeIndex].id);
+      if (resolved.valid) {
+        entry.origin = toWorld(glm::vec2(0.0f), resolved.plane, resolved.offsetMm);
+        entry.direction = planeNormal(resolved.plane);
+      }
+    }
+  } else if (app->selectedObject >= 0 && app->selectedObject < static_cast<int>(app->sceneObjects.size())) {
+    const Aabb box = meshAabb(app->sceneObjects[app->selectedObject]);
+    if (box.valid) {
+      entry.origin = aabbCenter(box);
+      const glm::vec3 span = box.max - box.min;
+      if (span.x >= span.y && span.x >= span.z) entry.direction = {1.0f, 0.0f, 0.0f};
+      else if (span.y >= span.x && span.y >= span.z) entry.direction = {0.0f, 1.0f, 0.0f};
+      else entry.direction = {0.0f, 0.0f, 1.0f};
+      entry.displayLengthMm = std::max({span.x, span.y, span.z, 40.0f}) * 1.25f;
+    }
+  }
+
+  ReferenceGeometryAction action;
+  action.geometryType = "Axis";
+  action.name = entry.meta.name.data();
+  app->timeline.push(std::move(action), "Create " + std::string(entry.meta.name.data()));
+  app->timelineCursor = app->timeline.size() - 1;
+
+  app->referenceAxes.push_back(entry);
+  app->browserSelectedAxes.assign(1, static_cast<int>(app->referenceAxes.size()) - 1);
+  app->axisSelectionAnchor = static_cast<int>(app->referenceAxes.size()) - 1;
+}
+
 void appendSceneObject(AppState* app, StlMesh mesh) {
   app->sceneObjects.push_back(std::move(mesh));
   ObjectMetadata meta;
@@ -606,9 +687,15 @@ void pushObjectUndoSnapshot(AppState* app) {
   ObjectEditSnapshot snap;
   snap.sceneObjects = app->sceneObjects;
   snap.sceneObjectMeta = app->sceneObjectMeta;
+  snap.referenceAxes = app->referenceAxes;
+  snap.referencePoints = app->referencePoints;
   snap.selectedObject = app->selectedObject;
   snap.nextObjectNumber = app->nextObjectNumber;
+  snap.nextAxisNumber = app->nextAxisNumber;
+  snap.nextPointNumber = app->nextPointNumber;
   snap.browserSelectedObjects = app->browserSelectedObjects;
+  snap.browserSelectedAxes = app->browserSelectedAxes;
+  snap.browserSelectedPoints = app->browserSelectedPoints;
   app->objectUndoStack.push_back(std::move(snap));
   constexpr size_t kMaxObjectUndoLevels = 64;
   if (app->objectUndoStack.size() > kMaxObjectUndoLevels) {
@@ -630,9 +717,15 @@ bool objectUndo(AppState* app) {
   ObjectEditSnapshot current;
   current.sceneObjects = app->sceneObjects;
   current.sceneObjectMeta = app->sceneObjectMeta;
+  current.referenceAxes = app->referenceAxes;
+  current.referencePoints = app->referencePoints;
   current.selectedObject = app->selectedObject;
   current.nextObjectNumber = app->nextObjectNumber;
+  current.nextAxisNumber = app->nextAxisNumber;
+  current.nextPointNumber = app->nextPointNumber;
   current.browserSelectedObjects = app->browserSelectedObjects;
+  current.browserSelectedAxes = app->browserSelectedAxes;
+  current.browserSelectedPoints = app->browserSelectedPoints;
   app->objectRedoStack.push_back(std::move(current));
 
   ObjectEditSnapshot snap = std::move(app->objectUndoStack.back());
@@ -647,9 +740,15 @@ bool objectRedo(AppState* app) {
   ObjectEditSnapshot current;
   current.sceneObjects = app->sceneObjects;
   current.sceneObjectMeta = app->sceneObjectMeta;
+  current.referenceAxes = app->referenceAxes;
+  current.referencePoints = app->referencePoints;
   current.selectedObject = app->selectedObject;
   current.nextObjectNumber = app->nextObjectNumber;
+  current.nextAxisNumber = app->nextAxisNumber;
+  current.nextPointNumber = app->nextPointNumber;
   current.browserSelectedObjects = app->browserSelectedObjects;
+  current.browserSelectedAxes = app->browserSelectedAxes;
+  current.browserSelectedPoints = app->browserSelectedPoints;
   app->objectUndoStack.push_back(std::move(current));
 
   ObjectEditSnapshot snap = std::move(app->objectRedoStack.back());
@@ -677,6 +776,18 @@ bool validateDeterministicAppState(const AppState* app, std::string& error) {
     error = "timeline cursor out of range";
     return false;
   }
+  for (int idx : app->browserSelectedAxes) {
+    if (idx < 0 || idx >= static_cast<int>(app->referenceAxes.size())) {
+      error = "selected axis out of range";
+      return false;
+    }
+  }
+  for (int idx : app->browserSelectedPoints) {
+    if (idx < 0 || idx >= static_cast<int>(app->referencePoints.size())) {
+      error = "selected point out of range";
+      return false;
+    }
+  }
   return true;
 }
 
@@ -690,6 +801,16 @@ void clearSceneObjects(AppState* app) {
   app->nextObjectNumber = 1;
   app->renameObjectIndex = -1;
   app->renameSketchIndex = -1;
+  app->referenceAxes.clear();
+  app->referencePoints.clear();
+  app->browserSelectedAxes.clear();
+  app->browserSelectedPoints.clear();
+  app->axisSelectionAnchor = -1;
+  app->pointSelectionAnchor = -1;
+  app->nextAxisNumber = 1;
+  app->nextPointNumber = 1;
+  app->objectUndoStack.clear();
+  app->objectRedoStack.clear();
 }
 
 void beginObjectRename(AppState* app, int idx) {
@@ -921,6 +1042,86 @@ bool applyAddCombine(AppState* app, const std::vector<int>& targetsRaw,
   return true;
 }
 
+bool applyIntersectCombine(AppState* app, const std::vector<int>& targetsRaw,
+                           const std::vector<int>& toolsRaw, bool keepTools) {
+  std::vector<int> targets = targetsRaw;
+  std::vector<int> tools = toolsRaw;
+  sanitizeObjectIndices(targets, static_cast<int>(app->sceneObjects.size()));
+  sanitizeObjectIndices(tools, static_cast<int>(app->sceneObjects.size()));
+  targets.erase(std::remove_if(targets.begin(), targets.end(), [app](int idx) {
+                  return idx >= static_cast<int>(app->sceneObjectMeta.size()) ||
+                         app->sceneObjectMeta[idx].locked;
+                }),
+                targets.end());
+  tools.erase(std::remove_if(tools.begin(), tools.end(), [app, keepTools](int idx) {
+                return idx >= static_cast<int>(app->sceneObjectMeta.size()) ||
+                       (app->sceneObjectMeta[idx].locked && !keepTools);
+              }),
+              tools.end());
+  for (int idx : targets) {
+    eraseIndex(tools, idx);
+  }
+  if (targets.empty() || tools.empty()) return false;
+
+  pushObjectUndoSnapshot(app);
+
+  std::vector<Aabb> targetBoxes;
+  targetBoxes.reserve(targets.size());
+  for (int idx : targets) targetBoxes.push_back(meshAabb(app->sceneObjects[idx]));
+
+  std::vector<Aabb> toolBoxes;
+  toolBoxes.reserve(tools.size());
+  for (int idx : tools) toolBoxes.push_back(meshAabb(app->sceneObjects[idx]));
+
+  std::vector<int> overlapTargets;
+  std::vector<int> overlapTools;
+  for (size_t ti = 0; ti < targets.size(); ++ti) {
+    for (size_t oi = 0; oi < tools.size(); ++oi) {
+      if (aabbOverlap(targetBoxes[ti], toolBoxes[oi])) {
+        addUniqueIndex(overlapTargets, targets[ti]);
+        addUniqueIndex(overlapTools, tools[oi]);
+      }
+    }
+  }
+
+  if (overlapTargets.empty()) return false;
+
+  StlMesh merged;
+  for (int idx : overlapTargets) merged.append(app->sceneObjects[idx]);
+  for (int idx : overlapTools) merged.append(app->sceneObjects[idx]);
+
+  std::vector<bool> remove(app->sceneObjects.size(), false);
+  for (int idx : targets) remove[idx] = true;
+  if (!keepTools) {
+    for (int idx : overlapTools) remove[idx] = true;
+  }
+
+  std::vector<StlMesh> next;
+  std::vector<ObjectMetadata> nextMeta;
+  next.reserve(app->sceneObjects.size() + 1);
+  nextMeta.reserve(app->sceneObjectMeta.size() + 1);
+  for (int i = 0; i < static_cast<int>(app->sceneObjects.size()); ++i) {
+    if (!remove[i]) {
+      next.push_back(std::move(app->sceneObjects[i]));
+      nextMeta.push_back(app->sceneObjectMeta[i]);
+    }
+  }
+
+  next.push_back(std::move(merged));
+  ObjectMetadata mergedMeta;
+  setName(mergedMeta.name, "Object " + std::to_string(app->nextObjectNumber++));
+  const glm::vec3 color = randomPastelColor();
+  mergedMeta.colorRgb = {color.x, color.y, color.z};
+  nextMeta.push_back(mergedMeta);
+
+  app->sceneObjects = std::move(next);
+  app->sceneObjectMeta = std::move(nextMeta);
+  app->selectedObject = static_cast<int>(app->sceneObjects.size()) - 1;
+  app->browserSelectedObjects.assign(1, app->selectedObject);
+  rebuildCombinedMesh(app);
+  return true;
+}
+
 bool applySubtractExtrude(AppState* app, const StlMesh& extruded,
                           const std::vector<int>& targetsRaw) {
   if (extruded.empty()) return false;
@@ -1069,6 +1270,167 @@ bool applyChamferEdges(AppState* app, int objectIndex,
   }
 
   if (!changed) return false;
+
+  for (size_t i = 0; i + 2 < inds.size(); i += 3) {
+    StlVertex& va = verts[inds[i + 0]];
+    StlVertex& vb = verts[inds[i + 1]];
+    StlVertex& vc = verts[inds[i + 2]];
+    glm::vec3 n = glm::normalize(glm::cross(vb.position - va.position, vc.position - va.position));
+    if (glm::dot(n, n) < 1e-8f) {
+      n = {0.0f, 0.0f, 1.0f};
+    }
+    va.normal = n;
+    vb.normal = n;
+    vc.normal = n;
+  }
+
+  app->sceneObjects[objectIndex] = StlMesh::fromGeometry(std::move(verts), inds);
+  app->selectedObject = objectIndex;
+  app->browserSelectedObjects.assign(1, objectIndex);
+  rebuildCombinedMesh(app);
+  return true;
+}
+
+bool applyFilletEdges(AppState* app, int objectIndex,
+                      const std::vector<ChamferEdgeSelection>& edges,
+                      float radiusMm) {
+  if (objectIndex < 0 || objectIndex >= static_cast<int>(app->sceneObjects.size())) return false;
+  if (radiusMm <= 0.0f || edges.empty()) return false;
+  if (objectIndex >= static_cast<int>(app->sceneObjectMeta.size()) ||
+      app->sceneObjectMeta[objectIndex].locked) {
+    return false;
+  }
+
+  const StlMesh& srcMesh = app->sceneObjects[objectIndex];
+  auto verts = srcMesh.vertices();
+  const auto& inds = srcMesh.indices();
+  if (verts.empty() || inds.empty()) return false;
+
+  pushObjectUndoSnapshot(app);
+
+  auto nearestPointOnSegment = [](glm::vec3 p, glm::vec3 a, glm::vec3 b) {
+    const glm::vec3 ab = b - a;
+    const float len2 = glm::dot(ab, ab);
+    if (len2 <= 1e-12f) return a;
+    const float t = glm::clamp(glm::dot(p - a, ab) / len2, 0.0f, 1.0f);
+    return a + ab * t;
+  };
+
+  std::vector<std::vector<uint32_t>> adjacency(verts.size());
+  for (size_t i = 0; i + 2 < inds.size(); i += 3) {
+    const uint32_t ia = inds[i + 0];
+    const uint32_t ib = inds[i + 1];
+    const uint32_t ic = inds[i + 2];
+    adjacency[ia].push_back(ib);
+    adjacency[ia].push_back(ic);
+    adjacency[ib].push_back(ia);
+    adjacency[ib].push_back(ic);
+    adjacency[ic].push_back(ia);
+    adjacency[ic].push_back(ib);
+  }
+  for (auto& neighbors : adjacency) {
+    std::sort(neighbors.begin(), neighbors.end());
+    neighbors.erase(std::unique(neighbors.begin(), neighbors.end()), neighbors.end());
+  }
+
+  std::vector<glm::vec3> nextPos(verts.size());
+  for (size_t i = 0; i < verts.size(); ++i) nextPos[i] = verts[i].position;
+
+  bool changed = false;
+  const float influenceRadius = radiusMm * 1.75f;
+  for (const auto& edge : edges) {
+    if (edge.objectIndex != objectIndex) continue;
+    for (size_t i = 0; i < verts.size(); ++i) {
+      if (adjacency[i].empty()) continue;
+      const glm::vec3 onEdge = nearestPointOnSegment(verts[i].position, edge.a, edge.b);
+      const float dist = glm::length(verts[i].position - onEdge);
+      if (dist > influenceRadius) continue;
+
+      glm::vec3 neighborAverage(0.0f);
+      for (uint32_t neighbor : adjacency[i]) {
+        neighborAverage += verts[neighbor].position;
+      }
+      neighborAverage /= static_cast<float>(adjacency[i].size());
+
+      const float blend = glm::clamp(1.0f - dist / influenceRadius, 0.0f, 1.0f) * 0.65f;
+      nextPos[i] = glm::mix(nextPos[i], neighborAverage, blend);
+      changed = true;
+    }
+  }
+
+  if (!changed) return false;
+
+  for (size_t i = 0; i < verts.size(); ++i) {
+    verts[i].position = nextPos[i];
+  }
+
+  for (size_t i = 0; i + 2 < inds.size(); i += 3) {
+    StlVertex& va = verts[inds[i + 0]];
+    StlVertex& vb = verts[inds[i + 1]];
+    StlVertex& vc = verts[inds[i + 2]];
+    glm::vec3 n = glm::normalize(glm::cross(vb.position - va.position, vc.position - va.position));
+    if (glm::dot(n, n) < 1e-8f) {
+      n = {0.0f, 0.0f, 1.0f};
+    }
+    va.normal = n;
+    vb.normal = n;
+    vc.normal = n;
+  }
+
+  app->sceneObjects[objectIndex] = StlMesh::fromGeometry(std::move(verts), inds);
+  app->selectedObject = objectIndex;
+  app->browserSelectedObjects.assign(1, objectIndex);
+  rebuildCombinedMesh(app);
+  return true;
+}
+
+bool applyDraftObject(AppState* app, int objectIndex, float angleDegrees) {
+  if (!app) return false;
+  if (objectIndex < 0 || objectIndex >= static_cast<int>(app->sceneObjects.size())) return false;
+  if (objectIndex >= static_cast<int>(app->sceneObjectMeta.size()) ||
+      app->sceneObjectMeta[objectIndex].locked) {
+    return false;
+  }
+  if (!std::isfinite(angleDegrees)) return false;
+  if (std::abs(angleDegrees) < 1e-4f) return false;
+
+  const StlMesh& srcMesh = app->sceneObjects[objectIndex];
+  auto verts = srcMesh.vertices();
+  const auto& inds = srcMesh.indices();
+  if (verts.empty() || inds.empty()) return false;
+
+  glm::vec3 bmin = verts[0].position;
+  glm::vec3 bmax = verts[0].position;
+  for (const auto& v : verts) {
+    bmin = glm::min(bmin, v.position);
+    bmax = glm::max(bmax, v.position);
+  }
+
+  const float height = bmax.z - bmin.z;
+  if (height <= 1e-6f) return false;
+
+  glm::vec2 center((bmin.x + bmax.x) * 0.5f, (bmin.y + bmax.y) * 0.5f);
+  float maxRadius = 0.0f;
+  for (const auto& v : verts) {
+    maxRadius = std::max(maxRadius, glm::length(glm::vec2(v.position.x, v.position.y) - center));
+  }
+  if (maxRadius <= 1e-6f) return false;
+
+  constexpr float kPi = 3.14159265358979f;
+  const float angleRad = angleDegrees * kPi / 180.0f;
+  const float taperAtTop = std::tan(angleRad) * (height / maxRadius);
+  if (!std::isfinite(taperAtTop)) return false;
+
+  pushObjectUndoSnapshot(app);
+
+  for (auto& v : verts) {
+    const float t = glm::clamp((v.position.z - bmin.z) / height, 0.0f, 1.0f);
+    const float scale = std::max(0.05f, 1.0f - taperAtTop * t);
+    glm::vec2 p(v.position.x, v.position.y);
+    p = center + (p - center) * scale;
+    v.position.x = p.x;
+    v.position.y = p.y;
+  }
 
   for (size_t i = 0; i + 2 < inds.size(); i += 3) {
     StlVertex& va = verts[inds[i + 0]];

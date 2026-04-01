@@ -8,16 +8,16 @@
 - [x] Add save/load round-trip checks for currently supported entities
 
 ## M2: Sketch and Parametric Foundation
-- [ ] Sketch entities: line, arc, circle, rectangle, polyline
-- [ ] Constraint set: coincident, H/V, parallel, perpendicular, equal, dimensions
-- [ ] Constraint conflict detection/reporting
-- [ ] Timeline-integrated sketch editing lifecycle
+- [x] Sketch entities: line, arc, circle, rectangle, polyline
+- [x] Constraint set: coincident, H/V, parallel, perpendicular, equal, dimensions
+- [x] Constraint conflict detection/reporting
+- [x] Timeline-integrated sketch editing lifecycle
 
 ## M3: Solid Modeling v1
-- [ ] Feature set: extrude, revolve, sweep, loft, shell, draft
-- [ ] Booleans: union/subtract/intersect
-- [ ] Fillet/chamfer baseline with reference persistence strategy
-- [ ] Robust reference geometry (planes/axes/points)
+- [x] Feature set: extrude, revolve, sweep, loft, shell, draft
+- [x] Booleans: union/subtract/intersect
+- [x] Fillet/chamfer baseline with reference persistence strategy
+- [x] Robust reference geometry (planes/axes/points)
 
 ## M4: CAM MVP
 - [ ] 2.5D ops: facing, pocket, contour, drilling
