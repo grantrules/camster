@@ -799,6 +799,7 @@ int main() {
           app.sketchTool.setTool(Tool::None);
         }
         if (ImGui::MenuItem("Line", nullptr, false, sketchUnlocked)) app.sketchTool.setTool(Tool::Line);
+        if (ImGui::MenuItem("Polyline", nullptr, false, sketchUnlocked)) app.sketchTool.setTool(Tool::Polyline);
         if (ImGui::MenuItem("Rectangle", nullptr, false, sketchUnlocked)) app.sketchTool.setTool(Tool::Rectangle);
         if (ImGui::MenuItem("Circle", nullptr, false, sketchUnlocked)) app.sketchTool.setTool(Tool::Circle);
         if (ImGui::MenuItem("Arc", nullptr, false, sketchUnlocked)) app.sketchTool.setTool(Tool::Arc);

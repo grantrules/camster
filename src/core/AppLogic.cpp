@@ -921,6 +921,86 @@ bool applyAddCombine(AppState* app, const std::vector<int>& targetsRaw,
   return true;
 }
 
+bool applyIntersectCombine(AppState* app, const std::vector<int>& targetsRaw,
+                           const std::vector<int>& toolsRaw, bool keepTools) {
+  std::vector<int> targets = targetsRaw;
+  std::vector<int> tools = toolsRaw;
+  sanitizeObjectIndices(targets, static_cast<int>(app->sceneObjects.size()));
+  sanitizeObjectIndices(tools, static_cast<int>(app->sceneObjects.size()));
+  targets.erase(std::remove_if(targets.begin(), targets.end(), [app](int idx) {
+                  return idx >= static_cast<int>(app->sceneObjectMeta.size()) ||
+                         app->sceneObjectMeta[idx].locked;
+                }),
+                targets.end());
+  tools.erase(std::remove_if(tools.begin(), tools.end(), [app, keepTools](int idx) {
+                return idx >= static_cast<int>(app->sceneObjectMeta.size()) ||
+                       (app->sceneObjectMeta[idx].locked && !keepTools);
+              }),
+              tools.end());
+  for (int idx : targets) {
+    eraseIndex(tools, idx);
+  }
+  if (targets.empty() || tools.empty()) return false;
+
+  pushObjectUndoSnapshot(app);
+
+  std::vector<Aabb> targetBoxes;
+  targetBoxes.reserve(targets.size());
+  for (int idx : targets) targetBoxes.push_back(meshAabb(app->sceneObjects[idx]));
+
+  std::vector<Aabb> toolBoxes;
+  toolBoxes.reserve(tools.size());
+  for (int idx : tools) toolBoxes.push_back(meshAabb(app->sceneObjects[idx]));
+
+  std::vector<int> overlapTargets;
+  std::vector<int> overlapTools;
+  for (size_t ti = 0; ti < targets.size(); ++ti) {
+    for (size_t oi = 0; oi < tools.size(); ++oi) {
+      if (aabbOverlap(targetBoxes[ti], toolBoxes[oi])) {
+        addUniqueIndex(overlapTargets, targets[ti]);
+        addUniqueIndex(overlapTools, tools[oi]);
+      }
+    }
+  }
+
+  if (overlapTargets.empty()) return false;
+
+  StlMesh merged;
+  for (int idx : overlapTargets) merged.append(app->sceneObjects[idx]);
+  for (int idx : overlapTools) merged.append(app->sceneObjects[idx]);
+
+  std::vector<bool> remove(app->sceneObjects.size(), false);
+  for (int idx : targets) remove[idx] = true;
+  if (!keepTools) {
+    for (int idx : overlapTools) remove[idx] = true;
+  }
+
+  std::vector<StlMesh> next;
+  std::vector<ObjectMetadata> nextMeta;
+  next.reserve(app->sceneObjects.size() + 1);
+  nextMeta.reserve(app->sceneObjectMeta.size() + 1);
+  for (int i = 0; i < static_cast<int>(app->sceneObjects.size()); ++i) {
+    if (!remove[i]) {
+      next.push_back(std::move(app->sceneObjects[i]));
+      nextMeta.push_back(app->sceneObjectMeta[i]);
+    }
+  }
+
+  next.push_back(std::move(merged));
+  ObjectMetadata mergedMeta;
+  setName(mergedMeta.name, "Object " + std::to_string(app->nextObjectNumber++));
+  const glm::vec3 color = randomPastelColor();
+  mergedMeta.colorRgb = {color.x, color.y, color.z};
+  nextMeta.push_back(mergedMeta);
+
+  app->sceneObjects = std::move(next);
+  app->sceneObjectMeta = std::move(nextMeta);
+  app->selectedObject = static_cast<int>(app->sceneObjects.size()) - 1;
+  app->browserSelectedObjects.assign(1, app->selectedObject);
+  rebuildCombinedMesh(app);
+  return true;
+}
+
 bool applySubtractExtrude(AppState* app, const StlMesh& extruded,
                           const std::vector<int>& targetsRaw) {
   if (extruded.empty()) return false;

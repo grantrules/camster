@@ -75,6 +75,8 @@ bool applyAddExtrude(AppState* app, const StlMesh& extruded,
                      const std::vector<int>& targetsRaw);
 bool applyAddCombine(AppState* app, const std::vector<int>& targetsRaw,
                      const std::vector<int>& toolsRaw, bool keepTools);
+bool applyIntersectCombine(AppState* app, const std::vector<int>& targetsRaw,
+                          const std::vector<int>& toolsRaw, bool keepTools);
 bool applySubtractExtrude(AppState* app, const StlMesh& extruded,
                           const std::vector<int>& targetsRaw);
 bool applySubtractCombine(AppState* app, const std::vector<int>& targetsRaw,

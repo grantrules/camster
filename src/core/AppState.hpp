@@ -28,7 +28,7 @@
 // Forward declarations
 class PrintSettings;
 
-enum class BooleanOp { Add, Subtract };
+enum class BooleanOp { Add, Subtract, Intersect };
 enum class ExtrudeOp { Add, Subtract, CreateNewObject };
 enum class ObjectPickMode { None, ExtrudeTargets, CombineTargets, CombineTools, ChamferEdges };
 enum class BrowserSection { Objects, Planes, Sketches };

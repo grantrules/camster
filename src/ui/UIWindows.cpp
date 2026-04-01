@@ -1710,7 +1710,7 @@ void drawCombineWindow(AppState* app) {
   bool open = app->combineOptions.visible;
   if (ImGui::Begin("Combine Tool", &open)) {
     int op = static_cast<int>(app->combineOptions.operation);
-    if (ImGui::Combo("Operation", &op, "Add\0Subtract\0")) {
+    if (ImGui::Combo("Operation", &op, "Add\0Subtract\0Intersect\0")) {
       app->combineOptions.operation = static_cast<BooleanOp>(op);
     }
     ImGui::Checkbox("Keep Tools", &app->combineOptions.keepTools);
@@ -1723,12 +1723,13 @@ void drawCombineWindow(AppState* app) {
                             ObjectPickMode::CombineTools, app);
 
     ImGui::Separator();
-    ImGui::TextDisabled("Subtract currently uses object-overlap fallback");
-    ImGui::TextDisabled("(removes overlapping targets by AABB)");
+    ImGui::TextDisabled("Subtract/Intersect use object-overlap fallback");
+    ImGui::TextDisabled("(AABB-based approximation)");
 
     ImGui::Separator();
     if (ImGui::Button("Apply")) {
       const bool subtract = (app->combineOptions.operation == BooleanOp::Subtract);
+      const bool intersect = (app->combineOptions.operation == BooleanOp::Intersect);
       auto targetNamesBefore = objectNames(app, app->combineOptions.targets);
       auto toolNamesBefore = objectNames(app, app->combineOptions.tools);
 
@@ -1741,7 +1742,9 @@ void drawCombineWindow(AppState* app) {
         ca.resultObjectName = objectName(
             app, static_cast<int>(app->sceneObjects.size()) - 1);
         app->timeline.push(std::move(ca),
-                           std::string(subtract ? "Subtract Combine" : "Add Combine"));
+                           std::string(subtract ? "Subtract Combine"
+                                                : (intersect ? "Intersect Combine"
+                                                             : "Add Combine")));
         app->timelineCursor = app->timeline.size() - 1;
       };
 
@@ -1753,6 +1756,15 @@ void drawCombineWindow(AppState* app) {
         } else {
           recordCombine();
           app->status = "Combine subtract complete (object-level)";
+        }
+      } else if (intersect) {
+        if (!applyIntersectCombine(app, app->combineOptions.targets,
+                                   app->combineOptions.tools,
+                                   app->combineOptions.keepTools)) {
+          app->status = "Combine intersect found no overlapping objects";
+        } else {
+          recordCombine();
+          app->status = "Combine intersect complete (AABB fallback)";
         }
       } else if (!applyAddCombine(app, app->combineOptions.targets,
                                   app->combineOptions.tools,

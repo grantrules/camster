@@ -91,6 +91,29 @@ void SketchTool::mouseClick(glm::vec2 planePos) {
       }
       break;
 
+    case Tool::Polyline:
+      if (step_ == Step::Idle) {
+        firstPoint_ = planePos;
+        cursor_ = planePos;
+        resetDimensions();
+        step_ = Step::Step1;
+      } else if (step_ == Step::Step1) {
+        cursor_ = planePos;
+        const glm::vec2 endPt = lineEndPoint();
+        if (glm::length(endPt - firstPoint_) > 1e-6f) {
+          CompletedSketchPrimitive completed;
+          completed.geometry = SketchLine{firstPoint_, endPt};
+          if (dimensions_[0]) {
+            completed.dimensions.push_back({SketchDimensionKind::Length, *dimensions_[0]});
+          }
+          result_ = std::move(completed);
+          firstPoint_ = endPt;
+          cursor_ = endPt;
+        }
+        resetDimensions();
+      }
+      break;
+
     case Tool::Rectangle:
       if (step_ == Step::Idle) {
         firstPoint_ = planePos;
@@ -171,13 +194,14 @@ void SketchTool::cancel() {
 
 int SketchTool::dimensionInputCount() const {
   if (step_ != Step::Step1) return 0;
-  if (tool_ == Tool::Line || tool_ == Tool::Circle) return 1;
+  if (tool_ == Tool::Line || tool_ == Tool::Polyline || tool_ == Tool::Circle) return 1;
   if (tool_ == Tool::Rectangle) return 2;
   return 0;
 }
 
 const char* SketchTool::dimensionPrompt(int index) const {
   if (tool_ == Tool::Line && index == 0) return "Length";
+  if (tool_ == Tool::Polyline && index == 0) return "Segment";
   if (tool_ == Tool::Rectangle && index == 0) return "Width";
   if (tool_ == Tool::Rectangle && index == 1) return "Height";
   if (tool_ == Tool::Circle && index == 0) return "Diameter";
@@ -198,6 +222,18 @@ bool SketchTool::finishFromDimensions() {
     completed.geometry = SketchLine{firstPoint_, lineEndPoint()};
     completed.dimensions.push_back({SketchDimensionKind::Length, *dimensions_[0]});
     result_ = std::move(completed);
+  } else if (tool_ == Tool::Polyline) {
+    if (!dimensions_[0]) return false;
+    CompletedSketchPrimitive completed;
+    const glm::vec2 endPt = lineEndPoint();
+    if (glm::length(endPt - firstPoint_) <= 1e-6f) return false;
+    completed.geometry = SketchLine{firstPoint_, endPt};
+    completed.dimensions.push_back({SketchDimensionKind::Length, *dimensions_[0]});
+    result_ = std::move(completed);
+    firstPoint_ = endPt;
+    cursor_ = endPt;
+    resetDimensions();
+    return true;
   } else if (tool_ == Tool::Rectangle) {
     if (!dimensions_[0] || !dimensions_[1]) return false;
     const glm::vec2 corner = rectangleCorner();
@@ -239,6 +275,14 @@ void SketchTool::appendPreview(std::vector<ColorVertex>& lines, SketchPlane plan
 
   switch (tool_) {
     case Tool::Line:
+      if (step_ == Step::Step1) {
+        appendCross(lines, firstPoint_, plane, kPointColor);
+        lines.push_back({toWorld(firstPoint_, plane), kPreviewColor});
+        lines.push_back({toWorld(lineEndPoint(), plane), kPreviewColor});
+      }
+      break;
+
+    case Tool::Polyline:
       if (step_ == Step::Step1) {
         appendCross(lines, firstPoint_, plane, kPointColor);
         lines.push_back({toWorld(firstPoint_, plane), kPreviewColor});

@@ -115,6 +115,8 @@ ToolbarAction Toolbar::draw(SketchTool& tool, ExtrudeTool& extrude, bool hasSele
       ImGui::SameLine();
       if (toolButton("Line", active == Tool::Line)) tool.setTool(Tool::Line);
       ImGui::SameLine();
+      if (toolButton("Poly", active == Tool::Polyline)) tool.setTool(Tool::Polyline);
+      ImGui::SameLine();
       if (toolButton("Rect", active == Tool::Rectangle)) tool.setTool(Tool::Rectangle);
       ImGui::SameLine();
       if (toolButton("Circle", active == Tool::Circle)) tool.setTool(Tool::Circle);
