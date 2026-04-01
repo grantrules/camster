@@ -1024,6 +1024,10 @@ void drawObjectBrowserWindow(AppState* app) {
             if (ImGui::MenuItem(meta.locked ? "Unlock" : "Lock")) {
               meta.locked = !meta.locked;
             }
+            if (ImGui::MenuItem("Randomize Pastel Color")) {
+              randomizeObjectColor(app, i);
+              app->status = "Object color randomized";
+            }
             ImGui::Separator();
             if (ImGui::MenuItem("Delete", nullptr, false, !meta.locked)) {
               app->pendingDeleteObjects.assign(1, i);

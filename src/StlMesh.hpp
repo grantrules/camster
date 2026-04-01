@@ -11,6 +11,7 @@
 struct StlVertex {
   glm::vec3 position;
   glm::vec3 normal;
+  glm::vec3 color{0.70f, 0.74f, 0.80f};
 };
 
 // Loads STL mesh files (both ASCII and binary variants) and can export back
@@ -31,6 +32,7 @@ class StlMesh {
   static StlMesh makeUnitCube();
   static StlMesh fromGeometry(std::vector<StlVertex> verts, std::vector<uint32_t> inds);
   void append(const StlMesh& other);
+  void append(const StlMesh& other, const glm::vec3& color);
 
  private:
   bool loadAscii(const std::string& text, std::string& error);

@@ -338,8 +338,20 @@ StlMesh StlMesh::fromGeometry(std::vector<StlVertex> verts, std::vector<uint32_t
 }
 
 void StlMesh::append(const StlMesh& other) {
+  append(other, glm::vec3(-1.0f));
+}
+
+void StlMesh::append(const StlMesh& other, const glm::vec3& color) {
   const auto base = static_cast<uint32_t>(vertices_.size());
-  vertices_.insert(vertices_.end(), other.vertices_.begin(), other.vertices_.end());
+  const bool useOverrideColor = color.x >= 0.0f && color.y >= 0.0f && color.z >= 0.0f;
+
+  vertices_.reserve(vertices_.size() + other.vertices_.size());
+  for (const auto& v : other.vertices_) {
+    StlVertex out = v;
+    if (useOverrideColor) out.color = color;
+    vertices_.push_back(out);
+  }
+
   for (uint32_t idx : other.indices_) {
     indices_.push_back(base + idx);
   }
