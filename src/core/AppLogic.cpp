@@ -560,6 +560,47 @@ void randomizeObjectColor(AppState* app, int objectIndex) {
   rebuildCombinedMesh(app);
 }
 
+bool setObjectVisibility(AppState* app, int objectIndex, bool visible) {
+  if (!app) return false;
+  if (objectIndex < 0 || objectIndex >= static_cast<int>(app->sceneObjectMeta.size())) return false;
+  if (app->sceneObjectMeta[objectIndex].visible == visible) return false;
+  pushObjectUndoSnapshot(app);
+  app->sceneObjectMeta[objectIndex].visible = visible;
+  rebuildCombinedMesh(app);
+  return true;
+}
+
+bool setObjectLocked(AppState* app, int objectIndex, bool locked) {
+  if (!app) return false;
+  if (objectIndex < 0 || objectIndex >= static_cast<int>(app->sceneObjectMeta.size())) return false;
+  if (app->sceneObjectMeta[objectIndex].locked == locked) return false;
+  pushObjectUndoSnapshot(app);
+  app->sceneObjectMeta[objectIndex].locked = locked;
+  return true;
+}
+
+bool renameObject(AppState* app, int objectIndex, const std::string& newNameRaw) {
+  if (!app) return false;
+  if (objectIndex < 0 || objectIndex >= static_cast<int>(app->sceneObjectMeta.size())) return false;
+
+  std::string newName = newNameRaw;
+  if (newName.empty()) return false;
+  if (newName == app->sceneObjectMeta[objectIndex].name.data()) return false;
+
+  pushObjectUndoSnapshot(app);
+
+  const std::string oldName = app->sceneObjectMeta[objectIndex].name.data();
+  setName(app->sceneObjectMeta[objectIndex].name, newName);
+  const std::string appliedName = app->sceneObjectMeta[objectIndex].name.data();
+  for (auto& plane : app->planes) {
+    if (plane.reference.kind == PlaneReferenceKind::OffsetFromFace &&
+        plane.reference.sourceObjectName == oldName) {
+      plane.reference.sourceObjectName = appliedName;
+    }
+  }
+  return true;
+}
+
 void pushObjectUndoSnapshot(AppState* app) {
   if (!app) return;
   ObjectEditSnapshot snap;
@@ -673,15 +714,7 @@ void commitObjectRename(AppState* app) {
     app->renameObjectIndex = -1;
     return;
   }
-  const std::string oldName = app->sceneObjectMeta[app->renameObjectIndex].name.data();
-  setName(app->sceneObjectMeta[app->renameObjectIndex].name, app->renameBuffer.data());
-  const std::string newName = app->sceneObjectMeta[app->renameObjectIndex].name.data();
-  for (auto& plane : app->planes) {
-    if (plane.reference.kind == PlaneReferenceKind::OffsetFromFace &&
-        plane.reference.sourceObjectName == oldName) {
-      plane.reference.sourceObjectName = newName;
-    }
-  }
+  renameObject(app, app->renameObjectIndex, app->renameBuffer.data());
   app->renameObjectIndex = -1;
 }
 

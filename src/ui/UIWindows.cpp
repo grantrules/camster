@@ -918,20 +918,13 @@ void drawObjectBrowserWindow(AppState* app) {
         ImGui::PushID(i);
 
         ImGui::TableSetColumnIndex(0);
-        const bool visBefore = meta.visible;
         if (visibilityIconToggle("##objvis", &meta.visible)) {
-          meta.visible = visBefore;
-          pushObjectUndoSnapshot(app);
-          meta.visible = !visBefore;
-          rebuildCombinedMesh(app);
+          setObjectVisibility(app, i, meta.visible);
         }
 
         ImGui::TableSetColumnIndex(1);
-        const bool lockBefore = meta.locked;
         if (lockIconToggle("##objlock", &meta.locked)) {
-          meta.locked = lockBefore;
-          pushObjectUndoSnapshot(app);
-          meta.locked = !lockBefore;
+          setObjectLocked(app, i, meta.locked);
         }
 
         ImGui::TableSetColumnIndex(2);
@@ -948,10 +941,8 @@ void drawObjectBrowserWindow(AppState* app) {
           if (cancel) {
             cancelBrowserRename(app);
           } else if (accepted) {
-            pushObjectUndoSnapshot(app);
             commitObjectRename(app);
           } else if (ImGui::IsItemDeactivated()) {
-            pushObjectUndoSnapshot(app);
             commitObjectRename(app);
           }
         } else {
@@ -991,13 +982,10 @@ void drawObjectBrowserWindow(AppState* app) {
               beginObjectRename(app, i);
             }
             if (ImGui::MenuItem(meta.visible ? "Hide" : "Show")) {
-              pushObjectUndoSnapshot(app);
-              meta.visible = !meta.visible;
-              rebuildCombinedMesh(app);
+              setObjectVisibility(app, i, !meta.visible);
             }
             if (ImGui::MenuItem(meta.locked ? "Unlock" : "Lock")) {
-              pushObjectUndoSnapshot(app);
-              meta.locked = !meta.locked;
+              setObjectLocked(app, i, !meta.locked);
             }
             if (ImGui::MenuItem("Randomize Pastel Color")) {
               randomizeObjectColor(app, i);

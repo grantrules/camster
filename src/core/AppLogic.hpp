@@ -58,6 +58,9 @@ void cancelBrowserRename(AppState* app);
 
 void deleteSceneObjects(AppState* app, const std::vector<int>& rawIndices);
 void randomizeObjectColor(AppState* app, int objectIndex);
+bool setObjectVisibility(AppState* app, int objectIndex, bool visible);
+bool setObjectLocked(AppState* app, int objectIndex, bool locked);
+bool renameObject(AppState* app, int objectIndex, const std::string& newName);
 void pushObjectUndoSnapshot(AppState* app);
 bool objectCanUndo(const AppState* app);
 bool objectCanRedo(const AppState* app);
